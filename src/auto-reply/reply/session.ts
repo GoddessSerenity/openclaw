@@ -413,6 +413,7 @@ export async function initSessionState(params: {
         chatType: sessionEntry.chatType,
         channel: sessionEntry.lastChannel,
         model: effectiveModel,
+        spawnedBy: sessionEntry.spawnedBy,
       }),
     ).catch(() => {});
 
