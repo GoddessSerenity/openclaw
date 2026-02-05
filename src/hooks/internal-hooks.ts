@@ -17,6 +17,8 @@ export type AgentBootstrapHookContext = {
   sessionKey?: string;
   sessionId?: string;
   agentId?: string;
+  /** Parent session key that spawned this session (for subagents). */
+  spawnedBy?: string;
 };
 
 export type AgentBootstrapHookEvent = InternalHookEvent & {
