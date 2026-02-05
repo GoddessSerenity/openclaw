@@ -9,6 +9,7 @@ import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
+import { resolveDefaultModel } from "./directive-handling.js";
 import {
   DEFAULT_RESET_TRIGGERS,
   deriveSessionMetaPatch,
@@ -361,6 +362,10 @@ export async function initSessionState(params: {
   if (isNewSession) {
     const hookRunner = getGlobalHookRunner();
 
+    // Resolve the effective model for this session
+    const { defaultProvider, defaultModel } = resolveDefaultModel({ cfg, agentId });
+    const effectiveModel = sessionEntry.modelOverride ?? `${defaultProvider}/${defaultModel}`;
+
     // If we're replacing a previous session (reset/expired), fire session:end first
     if (previousSessionEntry) {
       void triggerInternalHook(
@@ -368,6 +373,7 @@ export async function initSessionState(params: {
           sessionId: previousSessionEntry.sessionId,
           reason: resetTriggered ? "reset" : "expired",
           agentId,
+          model: effectiveModel,
         }),
       ).catch(() => {});
 
@@ -393,6 +399,7 @@ export async function initSessionState(params: {
         resetTriggered,
         chatType: sessionEntry.chatType,
         channel: sessionEntry.lastChannel,
+        model: effectiveModel,
       }),
     ).catch(() => {});
 
