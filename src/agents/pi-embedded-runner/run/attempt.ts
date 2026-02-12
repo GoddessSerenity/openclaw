@@ -7,6 +7,7 @@ import os from "node:os";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
+import { createInternalHookEvent, triggerInternalHook } from "../../../hooks/internal-hooks.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
@@ -493,6 +494,17 @@ export async function runEmbeddedAttempt(
       if (!session) {
         throw new Error("Embedded agent session missing");
       }
+
+      // Fire session:start for subagent sessions (mirrors auto-reply/reply/session.ts)
+      void triggerInternalHook(
+        createInternalHookEvent("session", "start", params.sessionKey ?? params.sessionId, {
+          sessionId: params.sessionId,
+          agentId: sessionAgentId,
+          channel: params.messageChannel ?? params.messageProvider,
+          model: params.modelId,
+          spawnedBy: params.spawnedBy ?? undefined,
+        }),
+      ).catch(() => {});
       const activeSession = session;
       const cacheTrace = createCacheTrace({
         cfg: params.config,
