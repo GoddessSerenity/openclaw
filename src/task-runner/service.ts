@@ -189,6 +189,30 @@ export class TaskRunnerService {
     }
   }
 
+  /** Remove a task record and its log/pid files. */
+  private async removeRecord(id: string) {
+    const state = this.requireState();
+    const task = state.tasks[id];
+    if (!task) {
+      return;
+    }
+    delete state.tasks[id];
+    this.children.delete(id);
+    try {
+      await fsp.unlink(task.logPath);
+    } catch {
+      /* ignore */
+    }
+    if (task.pidPath) {
+      try {
+        await fsp.unlink(task.pidPath);
+      } catch {
+        /* ignore */
+      }
+    }
+    await this.persist();
+  }
+
   private countRunning() {
     const state = this.requireState();
     let count = 0;
@@ -231,8 +255,57 @@ export class TaskRunnerService {
 
     const id = (req.id ?? "").trim() || randomUUID();
     const state = this.requireState();
-    if (state.tasks[id]) {
-      throw new Error(`Task already exists: ${id}`);
+
+    // --- forceByTags: stop all running/pending tasks that share any tag ---
+    if (req.forceByTags && req.tags?.length) {
+      const tagSet = new Set(req.tags);
+      const matches = Object.values(state.tasks)
+        .filter(
+          (t) =>
+            (t.status === "running" || t.status === "pending") &&
+            t.id !== id &&
+            (t.tags ?? []).some((tag) => tagSet.has(tag)),
+        )
+        .toSorted((a, b) => b.createdAt - a.createdAt); // newest first
+      for (const task of matches) {
+        try {
+          await this.stop(task.id, { timeoutMs: req.stopTimeoutMs });
+        } catch {
+          // already gone, ignore
+        }
+      }
+    }
+
+    // --- replace / force: handle existing task with same id ---
+    const existing = state.tasks[id];
+    if (existing) {
+      const isTerminal =
+        existing.status === "stopped" ||
+        existing.status === "failed" ||
+        existing.status === "killed" ||
+        existing.status === "lost" ||
+        existing.status === "timeout";
+
+      if (req.force) {
+        // force implies replace; stop if still running
+        if (!isTerminal) {
+          try {
+            await this.stop(id, { timeoutMs: req.stopTimeoutMs });
+          } catch {
+            // ignore
+          }
+        }
+        await this.removeRecord(id);
+      } else if (req.replace) {
+        if (!isTerminal) {
+          throw new Error(
+            `Task ${id} is still ${existing.status}; use force=true to stop it first`,
+          );
+        }
+        await this.removeRecord(id);
+      } else {
+        throw new Error(`Task already exists: ${id}`);
+      }
     }
 
     const createdAt = now();

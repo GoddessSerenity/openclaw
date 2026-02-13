@@ -7,7 +7,7 @@ export type TaskStatus =
   | "timeout"
   | "lost";
 
-export type TaskSignal = NodeJS.Signals | number | string;
+export type TaskSignal = NodeJS.Signals | number;
 
 export type TaskRecord = {
   id: string;
@@ -55,6 +55,29 @@ export type TaskStartRequest = {
   env?: Record<string, string>;
   tags?: string[];
   id?: string;
+
+  /**
+   * If true and a task with the same id exists in a terminal state,
+   * remove it and start a new one. If the existing task is still running,
+   * also stop it first when `force` is true.
+   */
+  replace?: boolean;
+
+  /**
+   * If true, force-stop any running/pending task with the same id before
+   * replacing it. Requires `replace` to also be true (or is implied).
+   */
+  force?: boolean;
+
+  /**
+   * If true and `tags` contains at least one tag, stop all running/pending
+   * tasks that share any of those tags before starting the new task.
+   * This is the "force-start by label" feature.
+   */
+  forceByTags?: boolean;
+
+  /** Timeout in ms for stopping tasks during force/replace (default 5000). */
+  stopTimeoutMs?: number;
 };
 
 export type TaskLogsRequest = {

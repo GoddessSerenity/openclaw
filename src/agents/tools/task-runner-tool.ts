@@ -35,6 +35,14 @@ const TaskRunnerToolSchema = Type.Object({
   args: Type.Optional(Type.Array(Type.String())),
   cwd: Type.Optional(Type.String()),
   env: Type.Optional(Type.Object({}, { additionalProperties: true })),
+  /** Replace a terminal task with the same id. */
+  replace: Type.Optional(Type.Boolean()),
+  /** Force-stop a running task with the same id before replacing it (implies replace). */
+  force: Type.Optional(Type.Boolean()),
+  /** Force-stop all running tasks sharing any of the provided tags before starting. */
+  forceByTags: Type.Optional(Type.Boolean()),
+  /** Timeout in ms for stopping tasks during force/replace operations. */
+  stopTimeoutMs: Type.Optional(Type.Number()),
 
   // signal
   signal: Type.Optional(Type.String()),
@@ -84,7 +92,7 @@ export function createTaskRunnerTool(): AnyAgentTool {
     description: `Manage long-running background tasks that persist across gateway restarts.
 
 ACTIONS:
-- task_start: Start a new task (detached) and persist it to disk.
+- task_start: Start a new task (detached) and persist it to disk. Options: replace=true to reuse a terminal task's id; force=true to stop+replace a running task; forceByTags=true to stop all running tasks with matching tags first.
 - task_stop: Stop a task (SIGTERM then SIGKILL).
 - task_signal: Send a signal to a task's process group.
 - task_status: Get current status + uptime.
@@ -112,7 +120,24 @@ NOTES:
           const argsList = readStringArrayParam(params, "args", { allowEmpty: true }) ?? [];
           const tags = readStringArrayParam(params, "tags", { allowEmpty: true });
           const env = readEnvObject(params);
-          return jsonResult(await svc.start({ id, command, args: argsList, cwd, env, tags }));
+          const replace = params.replace === true ? true : undefined;
+          const force = params.force === true ? true : undefined;
+          const forceByTags = params.forceByTags === true ? true : undefined;
+          const stopTimeoutMs = readNumberParam(params, "stopTimeoutMs");
+          return jsonResult(
+            await svc.start({
+              id,
+              command,
+              args: argsList,
+              cwd,
+              env,
+              tags,
+              replace,
+              force,
+              forceByTags,
+              stopTimeoutMs,
+            }),
+          );
         }
         case "task_stop": {
           const id = readStringParam(params, "id", { required: true });
