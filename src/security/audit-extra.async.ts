@@ -31,6 +31,8 @@ import {
   inspectPathPermissions,
   safeStat,
 } from "./audit-fs.js";
+import { pickSandboxToolPolicy } from "./audit-tool-policy.js";
+import { extensionUsesSkippedScannerPath, isPathInside } from "./scan-paths.js";
 import * as skillScanner from "./skill-scanner.js";
 
 export type SecurityAuditFinding = {
@@ -60,22 +62,6 @@ function expandTilde(p: string, env: NodeJS.ProcessEnv): string | null {
     return path.join(home, p.slice(2));
   }
   return null;
-}
-
-function isPathInside(basePath: string, candidatePath: string): boolean {
-  const base = path.resolve(basePath);
-  const candidate = path.resolve(candidatePath);
-  const rel = path.relative(base, candidate);
-  return rel === "" || (!rel.startsWith(`..${path.sep}`) && rel !== ".." && !path.isAbsolute(rel));
-}
-
-function extensionUsesSkippedScannerPath(entry: string): boolean {
-  const segments = entry.split(/[\\/]+/).filter(Boolean);
-  return segments.some(
-    (segment) =>
-      segment === "node_modules" ||
-      (segment.startsWith(".") && segment !== "." && segment !== ".."),
-  );
 }
 
 async function readPluginManifestExtensions(pluginPath: string): Promise<string[]> {
@@ -123,36 +109,6 @@ function formatCodeSafetyDetails(findings: SkillScanFinding[], rootDir: string):
     .join("\n");
 }
 
-function unionAllow(base?: string[], extra?: string[]): string[] | undefined {
-  if (!Array.isArray(extra) || extra.length === 0) {
-    return base;
-  }
-  if (!Array.isArray(base) || base.length === 0) {
-    return Array.from(new Set(["*", ...extra]));
-  }
-  return Array.from(new Set([...base, ...extra]));
-}
-
-function pickToolPolicy(config?: {
-  allow?: string[];
-  alsoAllow?: string[];
-  deny?: string[];
-}): SandboxToolPolicy | undefined {
-  if (!config) {
-    return undefined;
-  }
-  const allow = Array.isArray(config.allow)
-    ? unionAllow(config.allow, config.alsoAllow)
-    : Array.isArray(config.alsoAllow) && config.alsoAllow.length > 0
-      ? unionAllow(undefined, config.alsoAllow)
-      : undefined;
-  const deny = Array.isArray(config.deny) ? config.deny : undefined;
-  if (!allow && !deny) {
-    return undefined;
-  }
-  return { allow, deny };
-}
-
 function resolveToolPolicies(params: {
   cfg: OpenClawConfig;
   agentTools?: AgentToolsConfig;
@@ -163,8 +119,8 @@ function resolveToolPolicies(params: {
   const profilePolicy = resolveToolProfilePolicy(profile);
   const policies: Array<SandboxToolPolicy | undefined> = [
     profilePolicy,
-    pickToolPolicy(params.cfg.tools ?? undefined),
-    pickToolPolicy(params.agentTools),
+    pickSandboxToolPolicy(params.cfg.tools ?? undefined),
+    pickSandboxToolPolicy(params.agentTools),
   ];
   if (params.sandboxMode === "all") {
     policies.push(resolveSandboxToolPolicyForAgent(params.cfg, params.agentId ?? undefined));
