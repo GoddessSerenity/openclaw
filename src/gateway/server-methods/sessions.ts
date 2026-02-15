@@ -431,11 +431,14 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       : [];
 
     // Fire session:end hook for the deleted session
+    // NOTE: This should not overwrite a previously-emitted terminal end reason (completed/aborted/errored)
+    // in downstream consumers. We tag the payload with endKind='deleted' to help disambiguate.
     if (existed && sessionId) {
       void triggerInternalHook(
         createInternalHookEvent("session", "end", target.canonicalKey, {
           sessionId,
           reason: "deleted",
+          endKind: "deleted",
           agentId: target.agentId,
         }),
       ).catch(() => {});

@@ -7,6 +7,7 @@ import os from "node:os";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
+import { createInternalHookEvent, triggerInternalHook } from "../../../hooks/internal-hooks.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
@@ -1066,6 +1067,31 @@ export async function runEmbeddedAttempt(
             .catch((err) => {
               log.warn(`agent_end hook failed: ${err}`);
             });
+        }
+
+        // Emit a session:end internal hook for embedded subagent/cron runs.
+        // This is distinct from later session deletion/GC, which also emits session:end reason='deleted'.
+        // Downstream consumers should preserve this terminal reason.
+        const effectiveSessionKey = (params.sessionKey ?? params.sessionId)?.trim();
+        const shouldEmitSessionEnd =
+          !isProbeSession &&
+          Boolean(effectiveSessionKey) &&
+          (isSubagentSessionKey(effectiveSessionKey) || isCronSessionKey(effectiveSessionKey));
+        if (shouldEmitSessionEnd && effectiveSessionKey) {
+          const endReason = aborted || timedOut ? "aborted" : promptError ? "errored" : "completed";
+          void triggerInternalHook(
+            createInternalHookEvent("session", "end", effectiveSessionKey, {
+              sessionId: params.sessionId,
+              reason: endReason,
+              endKind: "run",
+              timedOut,
+              error: promptError ? describeUnknownError(promptError) : undefined,
+              spawnedBy: params.spawnedBy ?? undefined,
+              channel: normalizeMessageChannel(params.messageChannel ?? params.messageProvider),
+              model: params.modelId,
+              agentId: hookAgentId,
+            }),
+          ).catch(() => {});
         }
       } finally {
         clearTimeout(abortTimer);
