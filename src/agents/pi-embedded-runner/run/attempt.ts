@@ -7,6 +7,7 @@ import os from "node:os";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
+import { loadSessionStore, resolveStorePath } from "../../../config/sessions.js";
 import { createInternalHookEvent, triggerInternalHook } from "../../../hooks/internal-hooks.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
@@ -66,7 +67,7 @@ import {
 import { buildSystemPromptParams } from "../../system-prompt-params.js";
 import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import { resolveTranscriptPolicy } from "../../transcript-policy.js";
-import { DEFAULT_BOOTSTRAP_FILENAME } from "../../workspace.js";
+import { DEFAULT_BOOTSTRAP_FILENAME, loadCleanPrompt } from "../../workspace.js";
 import { isRunnerAbortError } from "../abort.js";
 import { appendCacheTtlTimestamp, isCacheTtlEligibleProvider } from "../cache-ttl.js";
 import { buildEmbeddedExtensionPaths } from "../extensions.js";
@@ -263,20 +264,56 @@ export async function runEmbeddedAttempt(
       workspaceDir: effectiveWorkspace,
     });
 
+    const { defaultAgentId, sessionAgentId } = resolveSessionAgentIds({
+      sessionKey: params.sessionKey,
+      config: params.config,
+    });
+
+    const cleanSession = (() => {
+      if (!params.sessionKey || !params.config?.session) {
+        return false;
+      }
+      try {
+        const storePath = resolveStorePath(params.config.session.store, {
+          agentId: sessionAgentId,
+        });
+        const store = loadSessionStore(storePath);
+        return Boolean(store[params.sessionKey]?.cleanSession);
+      } catch (err) {
+        log.warn(`Failed to resolve cleanSession flag: ${String(err)}`);
+        return false;
+      }
+    })();
+
+    const cleanPrompt = cleanSession
+      ? ((await loadCleanPrompt(effectiveWorkspace)) ?? undefined)
+      : undefined;
+
     const sessionLabel = params.sessionKey ?? params.sessionId;
-    const { bootstrapFiles: hookAdjustedBootstrapFiles, contextFiles } =
-      await resolveBootstrapContextForRun({
+
+    let hookAdjustedBootstrapFiles: Awaited<
+      ReturnType<typeof resolveBootstrapContextForRun>
+    >["bootstrapFiles"] = [];
+    let contextFiles: Awaited<ReturnType<typeof resolveBootstrapContextForRun>>["contextFiles"] =
+      [];
+    let workspaceNotes: string[] | undefined;
+
+    if (!cleanSession) {
+      const resolved = await resolveBootstrapContextForRun({
         workspaceDir: effectiveWorkspace,
         config: params.config,
         sessionKey: params.sessionKey,
         sessionId: params.sessionId,
         warn: makeBootstrapWarn({ sessionLabel, warn: (message) => log.warn(message) }),
       });
-    const workspaceNotes = hookAdjustedBootstrapFiles.some(
-      (file) => file.name === DEFAULT_BOOTSTRAP_FILENAME && !file.missing,
-    )
-      ? ["Reminder: commit your changes in this workspace after edits."]
-      : undefined;
+      hookAdjustedBootstrapFiles = resolved.bootstrapFiles;
+      contextFiles = resolved.contextFiles;
+      workspaceNotes = hookAdjustedBootstrapFiles.some(
+        (file) => file.name === DEFAULT_BOOTSTRAP_FILENAME && !file.missing,
+      )
+        ? ["Reminder: commit your changes in this workspace after edits."]
+        : undefined;
+    }
 
     const agentDir = params.agentDir ?? resolveOpenClawAgentDir();
 
@@ -370,10 +407,7 @@ export async function runEmbeddedAttempt(
             return undefined;
           })()
         : undefined;
-    const { defaultAgentId, sessionAgentId } = resolveSessionAgentIds({
-      sessionKey: params.sessionKey,
-      config: params.config,
-    });
+    // sessionAgentId/defaultAgentId already resolved earlier (needed for clean-session detection).
     const sandboxInfo = buildEmbeddedSandboxInfo(sandbox, params.bashElevated);
     const reasoningTagHint = isReasoningTagProvider(params.provider);
     // Resolve channel-specific message actions for system prompt
@@ -415,8 +449,9 @@ export async function runEmbeddedAttempt(
       },
     });
     const isDefaultAgent = sessionAgentId === defaultAgentId;
-    const promptMode =
-      isSubagentSessionKey(params.sessionKey) || isCronSessionKey(params.sessionKey)
+    const promptMode = cleanSession
+      ? "clean"
+      : isSubagentSessionKey(params.sessionKey) || isCronSessionKey(params.sessionKey)
         ? "minimal"
         : "full";
     const docsPath = await resolveOpenClawDocsPath({
@@ -429,6 +464,7 @@ export async function runEmbeddedAttempt(
 
     const appendPrompt = buildEmbeddedSystemPrompt({
       workspaceDir: effectiveWorkspace,
+      cleanPrompt,
       defaultThinkLevel: params.thinkLevel,
       reasoningLevel: params.reasoningLevel ?? "off",
       extraSystemPrompt: params.extraSystemPrompt,
@@ -838,10 +874,7 @@ export async function runEmbeddedAttempt(
       const hookAgentId =
         typeof params.agentId === "string" && params.agentId.trim()
           ? normalizeAgentId(params.agentId)
-          : resolveSessionAgentIds({
-              sessionKey: params.sessionKey,
-              config: params.config,
-            }).sessionAgentId;
+          : sessionAgentId;
 
       let promptError: unknown = null;
       try {

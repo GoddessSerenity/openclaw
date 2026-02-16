@@ -10,6 +10,8 @@ import { buildToolSummaryMap } from "../tool-summaries.js";
 
 export function buildEmbeddedSystemPrompt(params: {
   workspaceDir: string;
+  /** If promptMode="clean", this becomes the entire system prompt. */
+  cleanPrompt?: string;
   defaultThinkLevel?: ThinkLevel;
   reasoningLevel?: ReasoningLevel;
   extraSystemPrompt?: string;
@@ -51,6 +53,7 @@ export function buildEmbeddedSystemPrompt(params: {
 }): string {
   return buildAgentSystemPrompt({
     workspaceDir: params.workspaceDir,
+    cleanPrompt: params.cleanPrompt,
     defaultThinkLevel: params.defaultThinkLevel,
     reasoningLevel: params.reasoningLevel,
     extraSystemPrompt: params.extraSystemPrompt,

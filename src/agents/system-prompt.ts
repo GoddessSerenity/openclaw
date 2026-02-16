@@ -12,7 +12,7 @@ import { sanitizeForPromptLiteral } from "./sanitize-for-prompt.js";
  * - "minimal": Reduced sections (Tooling, Workspace, Runtime) - used for subagents
  * - "none": Just basic identity line, no sections
  */
-export type PromptMode = "full" | "minimal" | "none";
+export type PromptMode = "full" | "minimal" | "none" | "clean";
 
 function buildSkillsSection(params: {
   skillsPrompt?: string;
@@ -167,6 +167,8 @@ function buildDocsSection(params: { docsPath?: string; isMinimal: boolean; readT
 
 export function buildAgentSystemPrompt(params: {
   workspaceDir: string;
+  /** If promptMode="clean", this becomes the entire system prompt. */
+  cleanPrompt?: string;
   defaultThinkLevel?: ThinkLevel;
   reasoningLevel?: ReasoningLevel;
   extraSystemPrompt?: string;
@@ -391,6 +393,13 @@ export function buildAgentSystemPrompt(params: {
     readToolName,
   });
   const workspaceNotes = (params.workspaceNotes ?? []).map((note) => note.trim()).filter(Boolean);
+
+  // For "clean" mode, return ONLY CLEAN-PROMPT.md content (no scaffolding).
+  // If it's missing/empty, return an empty system prompt (vanilla chat).
+  if (promptMode === "clean") {
+    const cleanPrompt = params.cleanPrompt?.trim();
+    return cleanPrompt ?? "";
+  }
 
   // For "none" mode, return just the basic identity line
   if (promptMode === "none") {

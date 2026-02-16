@@ -101,6 +101,8 @@ export type SessionEntry = {
   lastThreadId?: string | number;
   skillsSnapshot?: SessionSkillSnapshot;
   systemPromptReport?: SessionSystemPromptReport;
+  /** If true, this session uses promptMode="clean" (CLEAN-PROMPT.md only). */
+  cleanSession?: boolean;
 };
 
 export function mergeSessionEntry(

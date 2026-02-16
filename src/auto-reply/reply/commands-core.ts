@@ -64,7 +64,7 @@ export async function handleCommands(params: HandleCommandsParams): Promise<Comm
       handleAbortTrigger,
     ];
   }
-  const resetMatch = params.command.commandBodyNormalized.match(/^\/(new|reset)(?:\s|$)/);
+  const resetMatch = params.command.commandBodyNormalized.match(/^\/(new|reset|clean)(?:\s|$)/);
   const resetRequested = Boolean(resetMatch);
   if (resetRequested && !params.command.isAuthorizedSender) {
     logVerbose(

@@ -29,6 +29,7 @@ export const DEFAULT_HEARTBEAT_FILENAME = "HEARTBEAT.md";
 export const DEFAULT_BOOTSTRAP_FILENAME = "BOOTSTRAP.md";
 export const DEFAULT_MEMORY_FILENAME = "MEMORY.md";
 export const DEFAULT_MEMORY_ALT_FILENAME = "memory.md";
+export const DEFAULT_CLEAN_PROMPT_FILENAME = "CLEAN-PROMPT.md";
 const WORKSPACE_STATE_DIRNAME = ".openclaw";
 const WORKSPACE_STATE_FILENAME = "workspace-state.json";
 const WORKSPACE_STATE_VERSION = 1;
@@ -543,4 +544,20 @@ export async function loadExtraBootstrapFiles(
     }
   }
   return result;
+}
+
+export async function loadCleanPrompt(dir: string): Promise<string | null> {
+  const resolvedDir = resolveUserPath(dir);
+  const filePath = path.join(resolvedDir, DEFAULT_CLEAN_PROMPT_FILENAME);
+  try {
+    const content = await fs.readFile(filePath, "utf-8");
+    const trimmed = content.trim();
+    return trimmed ? trimmed : null;
+  } catch (err) {
+    const anyErr = err as { code?: string };
+    if (anyErr.code === "ENOENT") {
+      return null;
+    }
+    throw err;
+  }
 }

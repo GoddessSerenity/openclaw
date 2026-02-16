@@ -204,6 +204,15 @@ export async function runPreparedReply(
     return undefined;
   }
   const isBareNewOrReset = rawBodyTrimmed === "/new" || rawBodyTrimmed === "/reset";
+  const isBareClean = rawBodyTrimmed === "/clean";
+
+  // /clean should reset the session state but not inject any greeting or prompt.
+  // If the message is *only* /clean, do not run the agent or reply.
+  if (isNewSession && isBareClean && baseBodyTrimmedRaw.length === 0) {
+    typing.cleanup();
+    return undefined;
+  }
+
   const isBareSessionReset =
     isNewSession &&
     ((baseBodyTrimmedRaw.length === 0 && rawBodyTrimmed.length > 0) || isBareNewOrReset);
