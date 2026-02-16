@@ -164,7 +164,19 @@ export const AgentsFilesSetResultSchema = Type.Object(
   { additionalProperties: false },
 );
 
-export const ModelsListParamsSchema = Type.Object({}, { additionalProperties: false });
+export const ModelsListParamsSchema = Type.Object(
+  {
+    providers: Type.Optional(
+      Type.Array(NonEmptyString, { description: "Filter to specific providers" }),
+    ),
+    configuredOnly: Type.Optional(
+      Type.Boolean({
+        description: "Only return models explicitly configured in agents.defaults.models",
+      }),
+    ),
+  },
+  { additionalProperties: false },
+);
 
 export const ModelsListResultSchema = Type.Object(
   {
