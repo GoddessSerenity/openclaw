@@ -10,6 +10,8 @@ import { dispatchInboundMessage } from "../../auto-reply/dispatch.js";
 import { createReplyDispatcher } from "../../auto-reply/reply/reply-dispatcher.js";
 import { createReplyPrefixOptions } from "../../channels/reply-prefix.js";
 import { resolveSessionFilePath } from "../../config/sessions.js";
+import { updateSessionStore } from "../../config/sessions/store.js";
+import { mergeSessionEntry, type SessionEntry } from "../../config/sessions/types.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel.js";
 import {
@@ -528,6 +530,8 @@ export const chatHandlers: GatewayRequestHandlers = {
       }>;
       timeoutMs?: number;
       idempotencyKey: string;
+      clean?: boolean;
+      model?: string;
     };
     const sanitizedMessageResult = sanitizeChatSendMessageInput(p.message);
     if (!sanitizedMessageResult.ok) {
@@ -566,7 +570,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       }
     }
     const rawSessionKey = p.sessionKey;
-    const { cfg, entry, canonicalKey: sessionKey } = loadSessionEntry(rawSessionKey);
+    const { cfg, entry, storePath, canonicalKey: sessionKey } = loadSessionEntry(rawSessionKey);
     const timeoutMs = resolveAgentTimeoutMs({
       cfg,
       overrideMs: p.timeoutMs,
@@ -620,6 +624,36 @@ export const chatHandlers: GatewayRequestHandlers = {
     }
 
     try {
+      const cleanFlag = p.clean === true;
+      const rawModel = typeof p.model === "string" ? p.model.trim() : undefined;
+      const modelFlag = rawModel && rawModel.length > 0 ? rawModel : undefined;
+
+      if (cleanFlag || modelFlag) {
+        await updateSessionStore(storePath, (store) => {
+          const patch: Partial<SessionEntry> = {};
+          if (cleanFlag) {
+            patch.cleanSession = true;
+          }
+          if (modelFlag) {
+            if (modelFlag.includes("/")) {
+              const [provider, ...rest] = modelFlag.split("/");
+              const model = rest.join("/").trim();
+              if (provider.trim()) {
+                patch.providerOverride = provider.trim();
+              }
+              if (model) {
+                patch.modelOverride = model;
+              }
+            } else {
+              patch.modelOverride = modelFlag;
+            }
+          }
+
+          const existing = store[sessionKey];
+          store[sessionKey] = mergeSessionEntry(existing, patch);
+        });
+      }
+
       const abortController = new AbortController();
       context.chatAbortControllers.set(clientRunId, {
         controller: abortController,

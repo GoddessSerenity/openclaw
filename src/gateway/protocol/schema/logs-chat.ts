@@ -40,6 +40,8 @@ export const ChatSendParamsSchema = Type.Object(
     attachments: Type.Optional(Type.Array(Type.Unknown())),
     timeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
     idempotencyKey: NonEmptyString,
+    clean: Type.Optional(Type.Boolean()),
+    model: Type.Optional(Type.String()),
   },
   { additionalProperties: false },
 );
