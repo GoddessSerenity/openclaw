@@ -270,11 +270,11 @@ export async function runEmbeddedAttempt(
     });
 
     const cleanSession = (() => {
-      if (!params.sessionKey || !params.config?.session) {
+      if (!params.sessionKey) {
         return false;
       }
       try {
-        const storePath = resolveStorePath(params.config.session.store, {
+        const storePath = resolveStorePath(params.config?.session?.store, {
           agentId: sessionAgentId,
         });
         const store = loadSessionStore(storePath);
