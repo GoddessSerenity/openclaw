@@ -400,16 +400,16 @@ export const chatHandlers: GatewayRequestHandlers = {
     const sessionId = entry?.sessionId;
     const rawMessages =
       sessionId && storePath ? readSessionMessages(sessionId, storePath, entry?.sessionFile) : [];
-    // Resolve file-referenced images (stored on disk) back to inline base64 for the client.
-    if (storePath) {
-      const sessionsDir = path.dirname(storePath);
-      resolveFileImageRefs(sessionsDir, rawMessages);
-    }
     const hardMax = 1000;
     const defaultLimit = 200;
     const requested = typeof limit === "number" ? limit : defaultLimit;
     const max = Math.min(hardMax, requested);
     const sliced = rawMessages.length > max ? rawMessages.slice(-max) : rawMessages;
+    // Resolve file-referenced images AFTER slicing to avoid loading images we'll discard.
+    if (storePath) {
+      const sessionsDir = path.dirname(storePath);
+      resolveFileImageRefs(sessionsDir, sliced);
+    }
     const sanitized = stripEnvelopeFromMessages(sliced);
     const capped = capArrayByJsonBytes(sanitized, getMaxChatHistoryMessagesBytes()).items;
     let thinkingLevel = entry?.thinkingLevel;

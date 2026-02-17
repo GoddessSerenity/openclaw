@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 const MIME_TO_EXT: Record<string, string> = {
@@ -81,9 +81,9 @@ export function resolveSessionImage(
 export function isFileImageRef(
   block: unknown,
 ): block is { type: "image"; source: { type: "file"; path: string; media_type: string } } {
-  if (!block || typeof block !== "object") return false;
+  if (!block || typeof block !== "object") {return false;}
   const b = block as Record<string, unknown>;
-  if (b.type !== "image") return false;
+  if (b.type !== "image") {return false;}
   const source = b.source as Record<string, unknown> | undefined;
   return source?.type === "file" && typeof source.path === "string";
 }
@@ -94,7 +94,7 @@ export function isFileImageRef(
 export function isBase64ImageBlock(
   block: unknown,
 ): block is { type: "image"; data: string; mimeType: string } {
-  if (!block || typeof block !== "object") return false;
+  if (!block || typeof block !== "object") {return false;}
   const b = block as Record<string, unknown>;
   return b.type === "image" && typeof b.data === "string" && typeof b.mimeType === "string";
 }
@@ -105,10 +105,10 @@ export function isBase64ImageBlock(
  */
 export function resolveFileImageRefs(sessionsDir: string, messages: unknown[]): void {
   for (const msg of messages) {
-    if (!msg || typeof msg !== "object") continue;
+    if (!msg || typeof msg !== "object") {continue;}
     const m = msg as Record<string, unknown>;
     const content = m.content;
-    if (!Array.isArray(content)) continue;
+    if (!Array.isArray(content)) {continue;}
 
     for (let i = 0; i < content.length; i++) {
       if (isFileImageRef(content[i])) {
@@ -127,26 +127,43 @@ export function resolveFileImageRefs(sessionsDir: string, messages: unknown[]): 
 
 /**
  * Post-process a session JSONL file: replace inline base64 images with file references.
- * Reads the file, stores any base64 images to disk, replaces them with file refs,
- * and rewrites the file. No-op if no images found.
+ * Only scans from the given byte offset (or the last 64KB if not provided) to avoid
+ * re-scanning the entire file on every turn. Uses atomic write (temp + rename) for safety.
  *
  * @param sessionFile Full path to the JSONL session file
+ * @param scanTailBytes How many bytes from the end to scan (default 64KB, enough for most turns)
  */
-export function externalizeSessionImages(sessionFile: string): void {
-  if (!existsSync(sessionFile)) return;
+export function externalizeSessionImages(sessionFile: string, scanTailBytes = 65536): void {
+  if (!existsSync(sessionFile)) {return;}
 
   const sessionsDir = dirname(sessionFile);
   const raw = readFileSync(sessionFile, "utf-8");
+
+  // Quick check: if no base64 image pattern exists in the tail, skip entirely
+  const tail = new Set(raw.slice(-scanTailBytes));
+  if (!tail.has('"type":"image"') && !tail.has('"type": "image"')) {return;}
+
   const lines = raw.split(/\r?\n/);
   let modified = false;
 
+  // Only scan lines that start within the tail region
+  const tailStartByte = Math.max(0, raw.length - scanTailBytes);
+  let bytePos = 0;
+
   for (let i = 0; i < lines.length; i++) {
+    const lineLen = lines[i].length + 1; // +1 for newline
+    if (bytePos + lineLen <= tailStartByte) {
+      bytePos += lineLen;
+      continue;
+    }
+    bytePos += lineLen;
+
     const line = lines[i];
-    if (!line.trim()) continue;
+    if (!line.trim()) {continue;}
 
     try {
       const entry = JSON.parse(line);
-      if (!entry?.message?.content || !Array.isArray(entry.message.content)) continue;
+      if (!entry?.message?.content || !Array.isArray(entry.message.content)) {continue;}
 
       let entryModified = false;
       for (let j = 0; j < entry.message.content.length; j++) {
@@ -168,7 +185,9 @@ export function externalizeSessionImages(sessionFile: string): void {
   }
 
   if (modified) {
-    writeFileSync(sessionFile, lines.join("\n"));
+    const tmpFile = sessionFile + ".tmp";
+    writeFileSync(tmpFile, lines.join("\n"));
+    renameSync(tmpFile, sessionFile);
   }
 }
 
@@ -178,10 +197,10 @@ export function externalizeSessionImages(sessionFile: string): void {
  */
 export function replaceBase64WithFileRefs(sessionsDir: string, messages: unknown[]): void {
   for (const msg of messages) {
-    if (!msg || typeof msg !== "object") continue;
+    if (!msg || typeof msg !== "object") {continue;}
     const m = msg as Record<string, unknown>;
     const content = m.content;
-    if (!Array.isArray(content)) continue;
+    if (!Array.isArray(content)) {continue;}
 
     for (let i = 0; i < content.length; i++) {
       if (isBase64ImageBlock(content[i])) {
