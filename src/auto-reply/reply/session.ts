@@ -27,13 +27,11 @@ import {
   updateSessionStore,
 } from "../../config/sessions.js";
 import { archiveSessionTranscripts } from "../../gateway/session-utils.fs.js";
-import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import { deliverSessionMaintenanceWarning } from "../../infra/session-maintenance-warning.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { normalizeMainKey } from "../../routing/session-key.js";
 import { normalizeSessionDeliveryFields } from "../../utils/delivery-context.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
-import { resolveDefaultModel } from "./directive-handling.js";
 import { normalizeInboundTextNewlines } from "./inbound-text.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 
@@ -91,7 +89,10 @@ function forkSessionFromParent(params: {
       cwd: manager.getCwd(),
       parentSession: parentSessionFile,
     };
-    fs.writeFileSync(sessionFile, `${JSON.stringify(header)}\n`, "utf-8");
+    fs.writeFileSync(sessionFile, `${JSON.stringify(header)}\n`, {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
     return { sessionId, sessionFile };
   } catch {
     return null;
@@ -125,7 +126,13 @@ export async function initSessionState(params: {
   const sessionScope = sessionCfg?.scope ?? "per-sender";
   const storePath = resolveStorePath(sessionCfg?.store, { agentId });
 
-  const sessionStore: Record<string, SessionEntry> = loadSessionStore(storePath);
+  // CRITICAL: Skip cache to ensure fresh data when resolving session identity.
+  // Stale cache (especially with multiple gateway processes or on Windows where
+  // mtime granularity may miss rapid writes) can cause incorrect sessionId
+  // generation, leading to orphaned transcript files. See #17971.
+  const sessionStore: Record<string, SessionEntry> = loadSessionStore(storePath, {
+    skipCache: true,
+  });
   let sessionKey: string | undefined;
   let sessionEntry: SessionEntry;
 
@@ -174,53 +181,29 @@ export async function initSessionState(params: {
   const trimmedBodyLower = trimmedBody.toLowerCase();
   const strippedForResetLower = strippedForReset.toLowerCase();
 
-  let cleanRequested = false;
-  if (resetAuthorized) {
-    const cleanTriggerLower = "/clean";
-    if (trimmedBodyLower === cleanTriggerLower || strippedForResetLower === cleanTriggerLower) {
+  for (const trigger of resetTriggers) {
+    if (!trigger) {
+      continue;
+    }
+    if (!resetAuthorized) {
+      break;
+    }
+    const triggerLower = trigger.toLowerCase();
+    if (trimmedBodyLower === triggerLower || strippedForResetLower === triggerLower) {
       isNewSession = true;
       bodyStripped = "";
       resetTriggered = true;
-      cleanRequested = true;
-    } else {
-      const cleanPrefixLower = `${cleanTriggerLower} `;
-      if (
-        trimmedBodyLower.startsWith(cleanPrefixLower) ||
-        strippedForResetLower.startsWith(cleanPrefixLower)
-      ) {
-        isNewSession = true;
-        bodyStripped = strippedForReset.slice(cleanTriggerLower.length).trimStart();
-        resetTriggered = true;
-        cleanRequested = true;
-      }
+      break;
     }
-  }
-
-  if (!cleanRequested) {
-    for (const trigger of resetTriggers) {
-      if (!trigger) {
-        continue;
-      }
-      if (!resetAuthorized) {
-        break;
-      }
-      const triggerLower = trigger.toLowerCase();
-      if (trimmedBodyLower === triggerLower || strippedForResetLower === triggerLower) {
-        isNewSession = true;
-        bodyStripped = "";
-        resetTriggered = true;
-        break;
-      }
-      const triggerPrefixLower = `${triggerLower} `;
-      if (
-        trimmedBodyLower.startsWith(triggerPrefixLower) ||
-        strippedForResetLower.startsWith(triggerPrefixLower)
-      ) {
-        isNewSession = true;
-        bodyStripped = strippedForReset.slice(trigger.length).trimStart();
-        resetTriggered = true;
-        break;
-      }
+    const triggerPrefixLower = `${triggerLower} `;
+    if (
+      trimmedBodyLower.startsWith(triggerPrefixLower) ||
+      strippedForResetLower.startsWith(triggerPrefixLower)
+    ) {
+      isNewSession = true;
+      bodyStripped = strippedForReset.slice(trigger.length).trimStart();
+      resetTriggered = true;
+      break;
     }
   }
 
@@ -284,7 +267,10 @@ export async function initSessionState(params: {
   const lastChannelRaw = (ctx.OriginatingChannel as string | undefined) || baseEntry?.lastChannel;
   const lastToRaw = ctx.OriginatingTo || ctx.To || baseEntry?.lastTo;
   const lastAccountIdRaw = ctx.AccountId || baseEntry?.lastAccountId;
-  const lastThreadIdRaw = ctx.MessageThreadId || baseEntry?.lastThreadId;
+  // Only fall back to persisted threadId for thread sessions.  Non-thread
+  // sessions (e.g. DM without topics) must not inherit a stale threadId from a
+  // previous interaction that happened inside a topic/thread.
+  const lastThreadIdRaw = ctx.MessageThreadId || (isThread ? baseEntry?.lastThreadId : undefined);
   const deliveryFields = normalizeSessionDeliveryFields({
     deliveryContext: {
       channel: lastChannelRaw,
@@ -303,7 +289,6 @@ export async function initSessionState(params: {
     updatedAt: Date.now(),
     systemSent,
     abortedLastRun,
-    cleanSession: cleanRequested ? true : resetTriggered ? undefined : baseEntry?.cleanSession,
     // Persist previously stored thinking/verbose levels when present.
     thinkingLevel: persistedThinking ?? baseEntry?.thinkingLevel,
     verboseLevel: persistedVerbose ?? baseEntry?.verboseLevel,
@@ -417,68 +402,6 @@ export async function initSessionState(params: {
       agentId,
       reason: "reset",
     });
-  }
-
-  // Trigger session lifecycle hooks for new sessions.
-  // Fire both internal hooks (HOOK.md-based) and plugin hooks.
-  // These fire asynchronously and errors are caught to avoid disrupting the
-  // session initialization flow.
-  if (isNewSession) {
-    const hookRunner = getGlobalHookRunner();
-
-    // Resolve the effective model for this session
-    const { defaultProvider, defaultModel } = resolveDefaultModel({ cfg, agentId });
-    const effectiveModel = sessionEntry.modelOverride ?? `${defaultProvider}/${defaultModel}`;
-
-    // If we're replacing a previous session (reset/expired), fire session:end first
-    if (previousSessionEntry) {
-      void triggerInternalHook(
-        createInternalHookEvent("session", "end", sessionKey, {
-          sessionId: previousSessionEntry.sessionId,
-          reason: resetTriggered ? "reset" : "expired",
-          agentId,
-          model: effectiveModel,
-        }),
-      ).catch(() => {});
-
-      if (hookRunner?.hasHooks("session_end")) {
-        void hookRunner
-          .runSessionEnd(
-            {
-              sessionId: previousSessionEntry.sessionId,
-              messageCount: 0, // Not tracked at session init time
-            },
-            { agentId, sessionId: previousSessionEntry.sessionId },
-          )
-          .catch(() => {});
-      }
-    }
-
-    // Fire session:start for the new session
-    void triggerInternalHook(
-      createInternalHookEvent("session", "start", sessionKey, {
-        sessionId,
-        agentId,
-        isGroup,
-        resetTriggered,
-        chatType: sessionEntry.chatType,
-        channel: sessionEntry.lastChannel,
-        model: effectiveModel,
-        spawnedBy: sessionEntry.spawnedBy,
-      }),
-    ).catch(() => {});
-
-    if (hookRunner?.hasHooks("session_start")) {
-      void hookRunner
-        .runSessionStart(
-          {
-            sessionId: sessionId ?? "",
-            resumedFrom: previousSessionEntry?.sessionId,
-          },
-          { agentId, sessionId: sessionId ?? "" },
-        )
-        .catch(() => {});
-    }
   }
 
   const sessionCtx: TemplateContext = {
