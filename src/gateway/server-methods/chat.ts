@@ -40,6 +40,7 @@ import {
   resolveSessionModelRef,
 } from "../session-utils.js";
 import { formatForLog } from "../ws-log.js";
+import { resolveFileImageRefs } from "../../media/session-image-store.js";
 import { injectTimestamp, timestampOptsFromConfig } from "./agent-timestamp.js";
 import { normalizeRpcAttachmentsToChatAttachments } from "./attachment-normalize.js";
 
@@ -399,6 +400,11 @@ export const chatHandlers: GatewayRequestHandlers = {
     const sessionId = entry?.sessionId;
     const rawMessages =
       sessionId && storePath ? readSessionMessages(sessionId, storePath, entry?.sessionFile) : [];
+    // Resolve file-referenced images (stored on disk) back to inline base64 for the client.
+    if (storePath) {
+      const sessionsDir = path.dirname(storePath);
+      resolveFileImageRefs(sessionsDir, rawMessages);
+    }
     const hardMax = 1000;
     const defaultLimit = 200;
     const requested = typeof limit === "number" ? limit : defaultLimit;
