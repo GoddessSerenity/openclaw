@@ -81,9 +81,13 @@ export function resolveSessionImage(
 export function isFileImageRef(
   block: unknown,
 ): block is { type: "image"; source: { type: "file"; path: string; media_type: string } } {
-  if (!block || typeof block !== "object") {return false;}
+  if (!block || typeof block !== "object") {
+    return false;
+  }
   const b = block as Record<string, unknown>;
-  if (b.type !== "image") {return false;}
+  if (b.type !== "image") {
+    return false;
+  }
   const source = b.source as Record<string, unknown> | undefined;
   return source?.type === "file" && typeof source.path === "string";
 }
@@ -94,7 +98,9 @@ export function isFileImageRef(
 export function isBase64ImageBlock(
   block: unknown,
 ): block is { type: "image"; data: string; mimeType: string } {
-  if (!block || typeof block !== "object") {return false;}
+  if (!block || typeof block !== "object") {
+    return false;
+  }
   const b = block as Record<string, unknown>;
   return b.type === "image" && typeof b.data === "string" && typeof b.mimeType === "string";
 }
@@ -105,19 +111,25 @@ export function isBase64ImageBlock(
  */
 export function resolveFileImageRefs(sessionsDir: string, messages: unknown[]): void {
   for (const msg of messages) {
-    if (!msg || typeof msg !== "object") {continue;}
+    if (!msg || typeof msg !== "object") {
+      continue;
+    }
     const m = msg as Record<string, unknown>;
     const content = m.content;
-    if (!Array.isArray(content)) {continue;}
+    if (!Array.isArray(content)) {
+      continue;
+    }
 
     for (let i = 0; i < content.length; i++) {
       if (isFileImageRef(content[i])) {
-        const resolved = resolveSessionImage(sessionsDir, content[i]);
+        const fileRef = content[i] as StoredImageRef;
+        const resolved = resolveSessionImage(sessionsDir, fileRef);
         if (resolved) {
           content[i] = {
             type: "image",
             data: resolved.data,
             mimeType: resolved.media_type,
+            _resolvedFromFile: fileRef.source.path,
           };
         }
       }
@@ -133,24 +145,32 @@ export function resolveFileImageRefs(sessionsDir: string, messages: unknown[]): 
  * @param sessionFile Full path to the JSONL session file
  */
 export function externalizeSessionImages(sessionFile: string): void {
-  if (!existsSync(sessionFile)) {return;}
+  if (!existsSync(sessionFile)) {
+    return;
+  }
 
   const sessionsDir = dirname(sessionFile);
   const raw = readFileSync(sessionFile, "utf-8");
 
   // Quick check: skip files with no image blocks at all
-  if (!raw.includes('"type":"image"') && !raw.includes('"type": "image"')) {return;}
+  if (!raw.includes('"type":"image"') && !raw.includes('"type": "image"')) {
+    return;
+  }
 
   const lines = raw.split(/\r?\n/);
   let modified = false;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (!line.trim()) {continue;}
+    if (!line.trim()) {
+      continue;
+    }
 
     try {
       const entry = JSON.parse(line);
-      if (!entry?.message?.content || !Array.isArray(entry.message.content)) {continue;}
+      if (!entry?.message?.content || !Array.isArray(entry.message.content)) {
+        continue;
+      }
 
       let entryModified = false;
       for (let j = 0; j < entry.message.content.length; j++) {
@@ -184,10 +204,14 @@ export function externalizeSessionImages(sessionFile: string): void {
  */
 export function replaceBase64WithFileRefs(sessionsDir: string, messages: unknown[]): void {
   for (const msg of messages) {
-    if (!msg || typeof msg !== "object") {continue;}
+    if (!msg || typeof msg !== "object") {
+      continue;
+    }
     const m = msg as Record<string, unknown>;
     const content = m.content;
-    if (!Array.isArray(content)) {continue;}
+    if (!Array.isArray(content)) {
+      continue;
+    }
 
     for (let i = 0; i < content.length; i++) {
       if (isBase64ImageBlock(content[i])) {
