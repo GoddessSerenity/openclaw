@@ -42,6 +42,7 @@ import {
   resolveSessionModelRef,
 } from "../session-utils.js";
 import { formatForLog } from "../ws-log.js";
+import { resolveFileImageRefs } from "../../media/session-image-store.js";
 import { injectTimestamp, timestampOptsFromConfig } from "./agent-timestamp.js";
 import { normalizeRpcAttachmentsToChatAttachments } from "./attachment-normalize.js";
 
@@ -589,6 +590,11 @@ export const chatHandlers: GatewayRequestHandlers = {
     const requested = typeof limit === "number" ? limit : defaultLimit;
     const max = Math.min(hardMax, requested);
     const sliced = rawMessages.length > max ? rawMessages.slice(-max) : rawMessages;
+    // Resolve file-referenced images AFTER slicing to avoid loading images we'll discard.
+    if (storePath) {
+      const sessionsDir = path.dirname(storePath);
+      resolveFileImageRefs(sessionsDir, sliced);
+    }
     const sanitized = stripEnvelopeFromMessages(sliced);
     const normalized = sanitizeChatHistoryMessages(sanitized);
     const maxHistoryBytes = getMaxChatHistoryMessagesBytes();

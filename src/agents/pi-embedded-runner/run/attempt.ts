@@ -4,6 +4,7 @@ import { streamSimple } from "@mariozechner/pi-ai";
 import { createAgentSession, SessionManager, SettingsManager } from "@mariozechner/pi-coding-agent";
 import fs from "node:fs/promises";
 import os from "node:os";
+import { dirname } from "node:path";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 import { resolveHeartbeatPrompt } from "../../../auto-reply/heartbeat.js";
 import { resolveChannelCapabilities } from "../../../config/channel-capabilities.js";
@@ -11,6 +12,7 @@ import { loadSessionStore, resolveStorePath } from "../../../config/sessions.js"
 import { createInternalHookEvent, triggerInternalHook } from "../../../hooks/internal-hooks.js";
 import { getMachineDisplayName } from "../../../infra/machine-name.js";
 import { MAX_IMAGE_BYTES } from "../../../media/constants.js";
+import { externalizeSessionImages, resolveFileImageRefs } from "../../../media/session-image-store.js";
 import { getGlobalHookRunner } from "../../../plugins/hook-runner-global.js";
 import {
   isCronSessionKey,
@@ -670,6 +672,12 @@ export async function runEmbeddedAttempt(
         params.streamParams,
       );
 
+      // Resolve file-referenced images in session history back to base64 for the LLM.
+      {
+        const sessionsDir = dirname(params.sessionFile);
+        resolveFileImageRefs(sessionsDir, activeSession.messages);
+      }
+
       if (cacheTrace) {
         cacheTrace.recordStage("session:loaded", {
           messages: activeSession.messages,
@@ -1071,6 +1079,16 @@ export async function runEmbeddedAttempt(
         } finally {
           log.debug(
             `embedded run prompt end: runId=${params.runId} sessionId=${params.sessionId} durationMs=${Date.now() - promptStartedAt}`,
+          );
+        }
+
+        // Externalize base64 images in the session transcript to file references.
+        // This keeps the JSONL file small while preserving full-size images on disk.
+        try {
+          externalizeSessionImages(params.sessionFile);
+        } catch (err) {
+          log.warn(
+            `Failed to externalize session images: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
 
