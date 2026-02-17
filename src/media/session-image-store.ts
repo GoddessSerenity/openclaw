@@ -127,37 +127,24 @@ export function resolveFileImageRefs(sessionsDir: string, messages: unknown[]): 
 
 /**
  * Post-process a session JSONL file: replace inline base64 images with file references.
- * Only scans from the given byte offset (or the last 64KB if not provided) to avoid
- * re-scanning the entire file on every turn. Uses atomic write (temp + rename) for safety.
+ * Stores images to disk and rewrites the file with file refs instead of base64 data.
+ * Uses atomic write (temp + rename) for safety. No-op if no images found.
  *
  * @param sessionFile Full path to the JSONL session file
- * @param scanTailBytes How many bytes from the end to scan (default 64KB, enough for most turns)
  */
-export function externalizeSessionImages(sessionFile: string, scanTailBytes = 65536): void {
+export function externalizeSessionImages(sessionFile: string): void {
   if (!existsSync(sessionFile)) {return;}
 
   const sessionsDir = dirname(sessionFile);
   const raw = readFileSync(sessionFile, "utf-8");
 
-  // Quick check: if no base64 image pattern exists in the tail, skip entirely
-  const tail = new Set(raw.slice(-scanTailBytes));
-  if (!tail.has('"type":"image"') && !tail.has('"type": "image"')) {return;}
+  // Quick check: skip files with no image blocks at all
+  if (!raw.includes('"type":"image"') && !raw.includes('"type": "image"')) {return;}
 
   const lines = raw.split(/\r?\n/);
   let modified = false;
 
-  // Only scan lines that start within the tail region
-  const tailStartByte = Math.max(0, raw.length - scanTailBytes);
-  let bytePos = 0;
-
   for (let i = 0; i < lines.length; i++) {
-    const lineLen = lines[i].length + 1; // +1 for newline
-    if (bytePos + lineLen <= tailStartByte) {
-      bytePos += lineLen;
-      continue;
-    }
-    bytePos += lineLen;
-
     const line = lines[i];
     if (!line.trim()) {continue;}
 
