@@ -180,29 +180,53 @@ export async function initSessionState(params: {
   const trimmedBodyLower = trimmedBody.toLowerCase();
   const strippedForResetLower = strippedForReset.toLowerCase();
 
-  for (const trigger of resetTriggers) {
-    if (!trigger) {
-      continue;
-    }
-    if (!resetAuthorized) {
-      break;
-    }
-    const triggerLower = trigger.toLowerCase();
-    if (trimmedBodyLower === triggerLower || strippedForResetLower === triggerLower) {
+  let cleanRequested = false;
+  if (resetAuthorized) {
+    const cleanTriggerLower = "/clean";
+    if (trimmedBodyLower === cleanTriggerLower || strippedForResetLower === cleanTriggerLower) {
       isNewSession = true;
       bodyStripped = "";
       resetTriggered = true;
-      break;
+      cleanRequested = true;
+    } else {
+      const cleanPrefixLower = `${cleanTriggerLower} `;
+      if (
+        trimmedBodyLower.startsWith(cleanPrefixLower) ||
+        strippedForResetLower.startsWith(cleanPrefixLower)
+      ) {
+        isNewSession = true;
+        bodyStripped = strippedForReset.slice(cleanTriggerLower.length).trimStart();
+        resetTriggered = true;
+        cleanRequested = true;
+      }
     }
-    const triggerPrefixLower = `${triggerLower} `;
-    if (
-      trimmedBodyLower.startsWith(triggerPrefixLower) ||
-      strippedForResetLower.startsWith(triggerPrefixLower)
-    ) {
-      isNewSession = true;
-      bodyStripped = strippedForReset.slice(trigger.length).trimStart();
-      resetTriggered = true;
-      break;
+  }
+
+  if (!cleanRequested) {
+    for (const trigger of resetTriggers) {
+      if (!trigger) {
+        continue;
+      }
+      if (!resetAuthorized) {
+        break;
+      }
+      const triggerLower = trigger.toLowerCase();
+      if (trimmedBodyLower === triggerLower || strippedForResetLower === triggerLower) {
+        isNewSession = true;
+        bodyStripped = "";
+        resetTriggered = true;
+        break;
+      }
+      const triggerPrefixLower = `${triggerLower} `;
+      if (
+        trimmedBodyLower.startsWith(triggerPrefixLower) ||
+        strippedForResetLower.startsWith(triggerPrefixLower)
+      ) {
+        isNewSession = true;
+        bodyStripped = strippedForReset.slice(trigger.length).trimStart();
+        resetTriggered = true;
+        break;
+      }
     }
   }
 
@@ -288,6 +312,7 @@ export async function initSessionState(params: {
     updatedAt: Date.now(),
     systemSent,
     abortedLastRun,
+    cleanSession: cleanRequested ? true : resetTriggered ? undefined : baseEntry?.cleanSession,
     // Persist previously stored thinking/verbose levels when present.
     thinkingLevel: persistedThinking ?? baseEntry?.thinkingLevel,
     verboseLevel: persistedVerbose ?? baseEntry?.verboseLevel,
@@ -437,6 +462,7 @@ export async function initSessionState(params: {
         chatType: sessionEntry.chatType,
         channel: sessionEntry.lastChannel,
         model: effectiveModel,
+        spawnedBy: sessionEntry.spawnedBy,
       }),
     ).catch(() => {});
 
