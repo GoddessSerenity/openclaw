@@ -7,7 +7,7 @@ export type TaskStatus =
   | "timeout"
   | "lost";
 
-export type TaskSignal = NodeJS.Signals | number | string;
+export type TaskSignal = NodeJS.Signals | number;
 
 export type TaskRecord = {
   id: string;
@@ -19,6 +19,7 @@ export type TaskRecord = {
   cwd?: string;
   env?: Record<string, string>;
   tags?: string[];
+  projectId?: string;
 
   createdAt: number;
   startedAt?: number;
@@ -54,6 +55,7 @@ export type TaskStartRequest = {
   cwd?: string;
   env?: Record<string, string>;
   tags?: string[];
+  projectId?: string;
   id?: string;
 };
 

@@ -30,6 +30,7 @@ const TaskRunnerToolSchema = Type.Object({
   // shared
   id: Type.Optional(Type.String()),
   tags: Type.Optional(Type.Array(Type.String())),
+  projectId: Type.Optional(Type.String()),
 
   // start
   command: Type.Optional(Type.String()),
@@ -113,8 +114,11 @@ NOTES:
           const cwd = readStringParam(params, "cwd");
           const argsList = readStringArrayParam(params, "args", { allowEmpty: true }) ?? [];
           const tags = readStringArrayParam(params, "tags", { allowEmpty: true });
+          const projectId = readStringParam(params, "projectId");
           const env = readEnvObject(params);
-          return jsonResult(await svc.start({ id, command, args: argsList, cwd, env, tags }));
+          return jsonResult(
+            await svc.start({ id, command, args: argsList, cwd, env, tags, projectId }),
+          );
         }
         case "task_restart": {
           const id = readStringParam(params, "id", { required: true });
@@ -141,7 +145,7 @@ NOTES:
         case "task_signal": {
           const id = readStringParam(params, "id", { required: true });
           const signal = readStringParam(params, "signal", { required: true, trim: true });
-          return jsonResult(await svc.signal(id, signal));
+          return jsonResult(await svc.signal(id, signal as NodeJS.Signals));
         }
         case "task_status": {
           const id = readStringParam(params, "id", { required: true });
@@ -156,8 +160,9 @@ NOTES:
         }
         case "task_list": {
           const tags = readStringArrayParam(params, "tags", { allowEmpty: true });
+          const projectId = readStringParam(params, "projectId");
           await svc.init();
-          return jsonResult({ tasks: svc.list({ tags }) });
+          return jsonResult({ tasks: svc.list({ tags, projectId }) });
         }
         case "task_write": {
           const id = readStringParam(params, "id", { required: true });
