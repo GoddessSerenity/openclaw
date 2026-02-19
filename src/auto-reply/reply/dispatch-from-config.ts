@@ -226,6 +226,40 @@ export async function dispatchReplyFromConfig(params: {
     });
   }
 
+  // Emit user message to internal hook system (activity.user_message)
+  {
+    const userMessageContent =
+      typeof ctx.BodyForCommands === "string"
+        ? ctx.BodyForCommands
+        : typeof ctx.RawBody === "string"
+          ? ctx.RawBody
+          : typeof ctx.Body === "string"
+            ? ctx.Body
+            : "";
+    const userMessageId =
+      ctx.MessageSidFull ?? ctx.MessageSid ?? ctx.MessageSidFirst ?? ctx.MessageSidLast;
+    const userMessageTs =
+      typeof ctx.Timestamp === "number" && Number.isFinite(ctx.Timestamp)
+        ? ctx.Timestamp
+        : Date.now();
+
+    void triggerInternalHook(
+      createInternalHookEvent("activity", "user_message", sessionKey ?? "", {
+        sessionKey,
+        role: "user",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: userMessageContent }],
+          timestamp: userMessageTs,
+        },
+        senderId: ctx.SenderId,
+        senderName: ctx.SenderName ?? ctx.SenderUsername,
+        channel: ctx.OriginatingChannel ?? ctx.Surface ?? ctx.Provider,
+        messageId: userMessageId,
+      }),
+    ).catch(() => {});
+  }
+
   // Check if we should route replies to originating channel instead of dispatcher.
   // Only route when the originating channel is DIFFERENT from the current surface.
   // This handles cross-provider routing (e.g., message from Telegram being processed

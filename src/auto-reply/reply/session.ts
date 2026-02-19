@@ -1,12 +1,10 @@
-import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { OpenClawConfig } from "../../config/config.js";
-import type { TtsAutoMode } from "../../config/types.tts.js";
-import type { MsgContext, TemplateContext } from "../templating.js";
+import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
+import type { OpenClawConfig } from "../../config/config.js";
 import {
   DEFAULT_RESET_TRIGGERS,
   deriveSessionMetaPatch,
@@ -26,12 +24,16 @@ import {
   type SessionScope,
   updateSessionStore,
 } from "../../config/sessions.js";
+import type { TtsAutoMode } from "../../config/types.tts.js";
 import { archiveSessionTranscripts } from "../../gateway/session-utils.fs.js";
+import { createInternalHookEvent, triggerInternalHook } from "../../hooks/internal-hooks.js";
 import { deliverSessionMaintenanceWarning } from "../../infra/session-maintenance-warning.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { normalizeMainKey } from "../../routing/session-key.js";
 import { normalizeSessionDeliveryFields } from "../../utils/delivery-context.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
+import type { MsgContext, TemplateContext } from "../templating.js";
+import { resolveDefaultModel } from "./directive-handling.js";
 import { normalizeInboundTextNewlines } from "./inbound-text.js";
 import { stripMentions, stripStructuralPrefixes } from "./mentions.js";
 
@@ -401,6 +403,53 @@ export async function initSessionState(params: {
     });
   }
 
+  if (isNewSession) {
+    const hookRunner = getGlobalHookRunner();
+    const { defaultProvider, defaultModel } = resolveDefaultModel({ cfg, agentId });
+    const effectiveModel = sessionEntry.modelOverride ?? `${defaultProvider}/${defaultModel}`;
+
+    if (previousSessionEntry) {
+      void triggerInternalHook(
+        createInternalHookEvent("session", "end", sessionKey, {
+          sessionId: previousSessionEntry.sessionId,
+          reason: resetTriggered ? "reset" : "expired",
+          agentId,
+          model: effectiveModel,
+        }),
+      ).catch(() => {});
+
+      if (hookRunner?.hasHooks("session_end")) {
+        void hookRunner
+          .runSessionEnd(
+            { sessionId: previousSessionEntry.sessionId, messageCount: 0 },
+            { agentId, sessionId: previousSessionEntry.sessionId },
+          )
+          .catch(() => {});
+      }
+    }
+
+    void triggerInternalHook(
+      createInternalHookEvent("session", "start", sessionKey, {
+        sessionId,
+        agentId,
+        isGroup,
+        resetTriggered,
+        chatType: sessionEntry.chatType,
+        channel: sessionEntry.lastChannel,
+        model: effectiveModel,
+      }),
+    ).catch(() => {});
+
+    if (hookRunner?.hasHooks("session_start")) {
+      void hookRunner
+        .runSessionStart(
+          { sessionId: sessionId ?? "", resumedFrom: previousSessionEntry?.sessionId },
+          { agentId, sessionId: sessionId ?? "" },
+        )
+        .catch(() => {});
+    }
+  }
+
   const sessionCtx: TemplateContext = {
     ...ctx,
     // Keep BodyStripped aligned with Body (best default for agent prompts).
@@ -417,46 +466,6 @@ export async function initSessionState(params: {
     SessionId: sessionId,
     IsNewSession: isNewSession ? "true" : "false",
   };
-
-  // Run session plugin hooks (fire-and-forget)
-  const hookRunner = getGlobalHookRunner();
-  if (hookRunner && isNewSession) {
-    const effectiveSessionId = sessionId ?? "";
-
-    // If replacing an existing session, fire session_end for the old one
-    if (previousSessionEntry?.sessionId && previousSessionEntry.sessionId !== effectiveSessionId) {
-      if (hookRunner.hasHooks("session_end")) {
-        void hookRunner
-          .runSessionEnd(
-            {
-              sessionId: previousSessionEntry.sessionId,
-              messageCount: 0,
-            },
-            {
-              sessionId: previousSessionEntry.sessionId,
-              agentId: resolveSessionAgentId({ sessionKey, config: cfg }),
-            },
-          )
-          .catch(() => {});
-      }
-    }
-
-    // Fire session_start for the new session
-    if (hookRunner.hasHooks("session_start")) {
-      void hookRunner
-        .runSessionStart(
-          {
-            sessionId: effectiveSessionId,
-            resumedFrom: previousSessionEntry?.sessionId,
-          },
-          {
-            sessionId: effectiveSessionId,
-            agentId: resolveSessionAgentId({ sessionKey, config: cfg }),
-          },
-        )
-        .catch(() => {});
-    }
-  }
 
   return {
     sessionCtx,
