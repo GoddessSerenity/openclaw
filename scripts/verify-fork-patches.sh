@@ -132,6 +132,14 @@ check_matches "src/gateway/server-startup.ts" "compaction.*start" "compaction st
 echo "=== 15. task_runner native tool ==="
 check_exists "src/agents/tools/task-runner-tool.ts" "task-runner tool"
 check_matches "src/agents/openclaw-tools.ts" "task.runner|task-runner" "tool registration"
+check_matches "src/task-runner/types.ts" "projectId" "projectId field"
+
+echo "=== 16. Project management runtime tool ==="
+check_exists "src/project/service.ts" "project service"
+check_exists "src/project/db.ts" "project db pool"
+check_exists "src/agents/tools/project-tool.ts" "project tool"
+check_matches "src/agents/openclaw-tools.ts" "project-tool" "project tool registration"
+check_matches "package.json" "mysql2" "mysql2 dependency"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
