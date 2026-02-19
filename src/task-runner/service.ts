@@ -6,6 +6,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { recoverTaskRunnerState } from "./recovery.js";
 import type {
   TaskLogsRequest,
   TaskLogsResponse,
@@ -16,7 +17,6 @@ import type {
   TaskStartRequest,
   TaskStatus,
 } from "./types.js";
-import { recoverTaskRunnerState } from "./recovery.js";
 
 function now() {
   return Date.now();
@@ -202,10 +202,14 @@ export class TaskRunnerService {
     return count;
   }
 
-  list(params?: { tags?: string[] }) {
+  list(params?: { tags?: string[]; projectId?: string }) {
     const state = this.requireState();
     const filterTags = normalizeTags(params?.tags);
-    const tasks = Object.values(state.tasks).toSorted((a, b) => b.createdAt - a.createdAt);
+    const projectId = params?.projectId?.trim();
+    let tasks = Object.values(state.tasks).toSorted((a, b) => b.createdAt - a.createdAt);
+    if (projectId) {
+      tasks = tasks.filter((t) => t.projectId === projectId);
+    }
     if (!filterTags?.length) {
       return tasks;
     }
@@ -291,6 +295,7 @@ export class TaskRunnerService {
       cwd: req.cwd,
       env: sanitizeEnv(req.env, this.config.blockedEnvVars),
       tags: normalizeTags(req.tags),
+      projectId: req.projectId?.trim() || undefined,
       createdAt,
       updatedAt: createdAt,
       logPath,
