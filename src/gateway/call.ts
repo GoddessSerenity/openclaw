@@ -155,7 +155,12 @@ export function buildGatewayConnectionDetails(
   // Security check: block ALL insecure ws:// to non-loopback addresses (CWE-319, CVSS 9.8)
   // This applies to the FINAL resolved URL, regardless of source (config, CLI override, etc).
   // Both credentials and chat/conversation data must not be transmitted over plaintext to remote hosts.
-  if (!isSecureWebSocketUrl(url)) {
+  // Fork patch: for local LAN/tailnet binds, rewrite to loopback for internal calls (sub-agents).
+  // The gateway is on the same machine; no need to go through the network interface.
+  const isLocalNonLoopback = !urlOverride && !remoteUrl && (preferLan || preferTailnet);
+  const effectiveUrl =
+    isLocalNonLoopback && !isSecureWebSocketUrl(url) ? `${scheme}://127.0.0.1:${localPort}` : url;
+  if (!isSecureWebSocketUrl(effectiveUrl)) {
     throw new Error(
       [
         `SECURITY ERROR: Gateway URL "${url}" uses plaintext ws:// to a non-loopback address.`,
@@ -178,7 +183,7 @@ export function buildGatewayConnectionDetails(
     .join("\n");
 
   return {
-    url,
+    url: effectiveUrl,
     urlSource,
     bindDetail,
     remoteFallbackNote,

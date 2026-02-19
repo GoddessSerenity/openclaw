@@ -404,9 +404,23 @@ export class ProjectService {
 
   async cmd_run(input: Record<string, unknown>) {
     await this.init();
-    const commandId = Number.parseInt(String(input.commandId ?? input.id ?? ""), 10);
+    let command: CommandRow;
+    const label = input.label as string | undefined;
+    const projectId = input.projectId as string | undefined;
+    if (label && projectId) {
+      const rows = await query<CommandRow>(
+        "SELECT * FROM project_commands WHERE project_id=? AND label=?",
+        [projectId, label],
+      );
+      if (rows.length === 0) {
+        throw new Error(`Command not found: ${projectId}/${label}`);
+      }
+      command = rows[0];
+    } else {
+      const commandId = Number.parseInt(String(input.commandId ?? input.id ?? ""), 10);
+      command = await this.ensureCommand(commandId);
+    }
     const taskId = input.taskId == null ? undefined : Number.parseInt(String(input.taskId), 10);
-    const command = await this.ensureCommand(commandId);
 
     const replaceTokens = (text: string) =>
       text
@@ -576,8 +590,9 @@ export class ProjectService {
         throw new Error("Project workspace_path required for branching tasks");
       }
       const branchName = `task/${task.id}`;
-      const worktreePath = path.join(project.workspace_path, ".worktrees", `task-${task.id}`);
-      await createWorktree(project.workspace_path, worktreePath, branchName);
+      const repoPath = path.join(project.workspace_path, "main");
+      const worktreePath = path.join(project.workspace_path, "worktrees", `task-${task.id}`);
+      await createWorktree(repoPath, worktreePath, branchName);
       await execute("UPDATE project_tasks SET git_branch=?, worktree_path=? WHERE id=?", [
         branchName,
         worktreePath,
@@ -666,7 +681,8 @@ export class ProjectService {
       throw new Error("workspace_path and git_branch required for merge");
     }
 
-    const merged = await mergeBranch(project.workspace_path, task.git_branch);
+    const repoPath = path.join(project.workspace_path, "main");
+    const merged = await mergeBranch(repoPath, task.git_branch);
     if (!merged.success) {
       if (merged.conflict) {
         return await this.transitionTaskStatus({
@@ -799,9 +815,8 @@ export class ProjectService {
       task.worktree_path &&
       task.git_branch
     ) {
-      await removeWorktree(project.workspace_path, task.worktree_path, task.git_branch).catch(
-        () => undefined,
-      );
+      const repoPath = path.join(project.workspace_path, "main");
+      await removeWorktree(repoPath, task.worktree_path, task.git_branch).catch(() => undefined);
     }
 
     return updated;
