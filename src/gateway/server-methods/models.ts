@@ -1,3 +1,5 @@
+import { DEFAULT_PROVIDER } from "../../agents/defaults.js";
+import { buildAllowedModelSet } from "../../agents/model-selection.js";
 import { loadConfig } from "../../config/config.js";
 import {
   ErrorCodes,
@@ -21,14 +23,20 @@ export const modelsHandlers: GatewayRequestHandlers = {
       return;
     }
     try {
-      let models = await context.loadGatewayModelCatalog();
+      const catalog = await context.loadGatewayModelCatalog();
+      const cfg = loadConfig();
+      const { allowedCatalog } = buildAllowedModelSet({
+        cfg,
+        catalog,
+        defaultProvider: DEFAULT_PROVIDER,
+      });
+      let models = allowedCatalog.length > 0 ? allowedCatalog : catalog;
       const providers = params?.providers;
       if (Array.isArray(providers) && providers.length > 0) {
         const allowed = new Set(providers.map((p: string) => p.toLowerCase()));
         models = models.filter((m) => allowed.has(m.provider.toLowerCase()));
       }
       if (params?.configuredOnly) {
-        const cfg = loadConfig();
         const configuredModels = cfg.agents?.defaults?.models;
         if (configuredModels && typeof configuredModels === "object") {
           const allowedIds = new Set(Object.keys(configuredModels).map((k) => k.toLowerCase()));

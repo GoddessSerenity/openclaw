@@ -7,6 +7,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import type { OpenClawConfig } from "../config/config.js";
 import type { ToolLoopDetectionConfig } from "../config/types.tools.js";
+import { resolveMergedSafeBinProfileFixtures } from "../infra/exec-safe-bin-runtime-policy.js";
 import { logWarn } from "../logger.js";
 import { getPluginToolMeta } from "../plugins/tools.js";
 import { isSubagentSessionKey } from "../routing/session-key.js";
@@ -41,6 +42,7 @@ import {
   normalizeToolParams,
   patchToolSchemaForClaudeCompatibility,
   wrapToolWorkspaceRootGuard,
+  wrapToolWorkspaceRootGuardWithOptions,
   wrapToolParamNormalization,
 } from "./pi-tools.read.js";
 import { cleanToolSchemaForGemini, normalizeToolParameters } from "./pi-tools.schema.js";
@@ -104,6 +106,11 @@ function resolveExecConfig(params: { cfg?: OpenClawConfig; agentId?: string }) {
     node: agentExec?.node ?? globalExec?.node,
     pathPrepend: agentExec?.pathPrepend ?? globalExec?.pathPrepend,
     safeBins: agentExec?.safeBins ?? globalExec?.safeBins,
+    safeBinTrustedDirs: agentExec?.safeBinTrustedDirs ?? globalExec?.safeBinTrustedDirs,
+    safeBinProfiles: resolveMergedSafeBinProfileFixtures({
+      global: globalExec,
+      local: agentExec,
+    }),
     backgroundMs: agentExec?.backgroundMs ?? globalExec?.backgroundMs,
     timeoutSec: agentExec?.timeoutSec ?? globalExec?.timeoutSec,
     approvalRunningNoticeMs:
@@ -312,7 +319,13 @@ export function createOpenClawCodingTools(options?: {
           modelContextWindowTokens: options?.modelContextWindowTokens,
           imageSanitization,
         });
-        return [workspaceOnly ? wrapToolWorkspaceRootGuard(sandboxed, sandboxRoot) : sandboxed];
+        return [
+          workspaceOnly
+            ? wrapToolWorkspaceRootGuardWithOptions(sandboxed, sandboxRoot, {
+                containerWorkdir: sandbox.containerWorkdir,
+              })
+            : sandboxed,
+        ];
       }
       const freshReadTool = createReadTool(workspaceRoot);
       const wrapped = createOpenClawReadTool(freshReadTool, {
@@ -349,14 +362,20 @@ export function createOpenClawCodingTools(options?: {
     return [tool];
   });
   const { cleanupMs: cleanupMsOverride, ...execDefaults } = options?.exec ?? {};
+  // Fail-closed baseline: when no sandbox context exists, default exec to gateway
+  // so we never silently treat "sandbox" as host execution.
+  const resolvedExecHost =
+    options?.exec?.host ?? execConfig.host ?? (sandbox ? "sandbox" : "gateway");
   const execTool = createExecTool({
     ...execDefaults,
-    host: options?.exec?.host ?? execConfig.host,
+    host: resolvedExecHost,
     security: options?.exec?.security ?? execConfig.security,
     ask: options?.exec?.ask ?? execConfig.ask,
     node: options?.exec?.node ?? execConfig.node,
     pathPrepend: options?.exec?.pathPrepend ?? execConfig.pathPrepend,
     safeBins: options?.exec?.safeBins ?? execConfig.safeBins,
+    safeBinTrustedDirs: options?.exec?.safeBinTrustedDirs ?? execConfig.safeBinTrustedDirs,
+    safeBinProfiles: options?.exec?.safeBinProfiles ?? execConfig.safeBinProfiles,
     agentId,
     cwd: workspaceRoot,
     allowBackground,
@@ -400,15 +419,21 @@ export function createOpenClawCodingTools(options?: {
       ? allowWorkspaceWrites
         ? [
             workspaceOnly
-              ? wrapToolWorkspaceRootGuard(
+              ? wrapToolWorkspaceRootGuardWithOptions(
                   createSandboxedEditTool({ root: sandboxRoot, bridge: sandboxFsBridge! }),
                   sandboxRoot,
+                  {
+                    containerWorkdir: sandbox.containerWorkdir,
+                  },
                 )
               : createSandboxedEditTool({ root: sandboxRoot, bridge: sandboxFsBridge! }),
             workspaceOnly
-              ? wrapToolWorkspaceRootGuard(
+              ? wrapToolWorkspaceRootGuardWithOptions(
                   createSandboxedWriteTool({ root: sandboxRoot, bridge: sandboxFsBridge! }),
                   sandboxRoot,
+                  {
+                    containerWorkdir: sandbox.containerWorkdir,
+                  },
                 )
               : createSandboxedWriteTool({ root: sandboxRoot, bridge: sandboxFsBridge! }),
           ]
