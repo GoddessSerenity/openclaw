@@ -207,8 +207,8 @@ After every upstream merge, run `./scripts/verify-fork-patches.sh` to ensure not
 
 ### 16. Project management runtime tool
 
-**Commits:** c8b1f74e2, da86bffa7
-**Description:** Full project management tool (`project`) backed by MariaDB. 38 actions covering project CRUD, links, stored commands, task state machine with git worktree support, task dependencies, status history, and per-project memory. Database: `openclaw_projects` with 8 tables.
+**Commits:** c8b1f74e2, da86bffa7, 3c02dfe47
+**Description:** Full project management tool (`project`) backed by MariaDB. 38 actions covering project CRUD, links, stored commands, task state machine with git worktree support, task dependencies, status history, and per-project memory. Includes task executor for autonomous agent-driven task execution. Database: `openclaw_projects` with 8 tables.
 **Files:**
 
 - `src/project/db.ts` (new file — MariaDB connection pool)
@@ -216,15 +216,21 @@ After every upstream merge, run `./scripts/verify-fork-patches.sh` to ensure not
 - `src/project/migrations.ts` (new file — idempotent SQL migrations)
 - `src/project/git.ts` (new file — worktree/branch helpers)
 - `src/project/service.ts` (new file — ProjectService with all 38 actions)
+- `src/project/executor.ts` (new file — autonomous task executor)
 - `src/agents/tools/project-tool.ts` (new file — tool definition + schema)
 - `src/agents/openclaw-tools.ts` (tool registration)
 - `src/task-runner/types.ts` (added projectId field)
 - `src/task-runner/service.ts` (persist/filter projectId)
 - `package.json` (added mysql2 dependency)
+- `docs/project-tool.md` (new file — tool documentation)
+- `scripts/executor-loop.sh` (new file — executor daemon loop)
+- `scripts/run-executor.sh` (new file — executor runner)
   **Signatures:**
 - `src/project/service.ts` EXISTS
 - `src/project/db.ts` EXISTS
+- `src/project/executor.ts` EXISTS
 - `src/agents/tools/project-tool.ts` EXISTS
 - `src/agents/openclaw-tools.ts` CONTAINS `project-tool`
 - `package.json` CONTAINS `mysql2`
 - `src/task-runner/types.ts` CONTAINS `projectId`
+- `scripts/executor-loop.sh` EXISTS
