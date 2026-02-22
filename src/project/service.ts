@@ -4,7 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { getTaskRunnerService } from "../task-runner/service.js";
 import { execute, query } from "./db.js";
-import { createWorktree, mergeBranch, removeWorktree } from "./git.js";
+import { createWorktree, initProjectRepo, removeWorktree } from "./git.js";
 import { runMigrations } from "./migrations.js";
 import {
   type CommandRow,
@@ -44,25 +44,6 @@ function asBool(value: unknown, fallback = false): boolean {
     }
   }
   return fallback;
-}
-
-function pickPostMergeStatus(task: TaskRow, project: ProjectRow): TaskStatus {
-  if (!task.requires_branching) {
-    if (project.has_build_step) {
-      return "building";
-    }
-    if (project.has_deploy_step) {
-      return "deploying";
-    }
-    return "done";
-  }
-  if (project.has_build_step) {
-    return "building";
-  }
-  if (project.has_deploy_step) {
-    return "deploying";
-  }
-  return "done";
 }
 
 export class ProjectService {
@@ -146,12 +127,15 @@ export class ProjectService {
       throw new Error("id and name required");
     }
     const description = input.description == null ? null : String(input.description);
-    const workspace_path = input.workspacePath == null ? null : String(input.workspacePath);
+    const workspace_path = `/home/serenity/pm-workspaces/${id}/`;
     const github_remote = input.githubRemote == null ? null : String(input.githubRemote);
     const telegram_topic_id =
       input.telegramTopicId == null ? null : Number.parseInt(String(input.telegramTopicId), 10);
     const has_build_step = asBool(input.hasBuildStep, true);
     const has_deploy_step = asBool(input.hasDeployStep, true);
+
+    // Initialize project repo and workspace directories
+    await initProjectRepo(workspace_path, github_remote);
 
     await execute(
       `INSERT INTO projects
@@ -464,8 +448,8 @@ export class ProjectService {
     const defaults = TASK_TYPE_DEFAULTS[taskType] ?? TASK_TYPE_DEFAULTS.feature;
     const result = await execute(
       `INSERT INTO project_tasks
-      (project_id, title, description, task_type, requires_branching, requires_human_review, priority, phase, assigned_model)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (project_id, title, description, task_type, requires_branching, requires_human_review, priority, phase)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         projectId,
         title,
@@ -479,11 +463,10 @@ export class ProjectService {
           : asBool(input.requiresHumanReview),
         Number.isFinite(Number(input.priority)) ? Number(input.priority) : 0,
         input.phase == null ? null : String(input.phase),
-        input.assignedModel == null ? null : String(input.assignedModel),
       ],
     );
     await execute(
-      "INSERT INTO task_status_history (task_id, from_status, to_status, actor, reason) VALUES (?, NULL, 'requirements', ?, ?)",
+      "INSERT INTO task_status_history (task_id, from_status, to_status, actor, reason) VALUES (?, NULL, 'planning', ?, ?)",
       [result.insertId, input.actor == null ? null : String(input.actor), "task created"],
     );
     return await this.ensureTask(result.insertId);
@@ -530,14 +513,13 @@ export class ProjectService {
     const task = await this.ensureTask(taskId);
     await execute(
       `UPDATE project_tasks
-       SET title=?, description=?, priority=?, phase=?, assigned_model=?, review_notes=?, review_feedback=?, dev_server_url=?
+       SET title=?, description=?, priority=?, phase=?, review_notes=?, review_feedback=?, dev_server_url=?
        WHERE id=?`,
       [
         input.title == null ? task.title : String(input.title),
         input.description == null ? task.description : String(input.description),
         input.priority == null ? task.priority : Number(input.priority),
         input.phase == null ? task.phase : String(input.phase),
-        input.assignedModel == null ? task.assigned_model : String(input.assignedModel),
         input.reviewNotes == null ? task.review_notes : String(input.reviewNotes),
         input.reviewFeedback == null ? task.review_feedback : String(input.reviewFeedback),
         input.devServerUrl == null ? task.dev_server_url : String(input.devServerUrl),
@@ -558,8 +540,7 @@ export class ProjectService {
       `SELECT t.*
        FROM project_tasks t
        WHERE t.project_id=?
-         AND t.status IN ('requirements','implementing','changes_requested','review_requested','approved','merge_conflict')
-         AND t.status <> 'blocked'
+         AND t.status = 'queue'
          AND NOT EXISTS (
            SELECT 1
            FROM project_task_dependencies d
@@ -576,14 +557,9 @@ export class ProjectService {
   async task_start(input: Record<string, unknown>) {
     await this.init();
     const taskId = Number.parseInt(String(input.taskId ?? input.id ?? ""), 10);
-    let task = await this.transitionTaskStatus({
-      taskId,
-      toStatus: "implementing",
-      allowedFrom: ["requirements", "changes_requested"],
-      actor: input.actor == null ? undefined : String(input.actor),
-      reason: input.reason == null ? "task started" : String(input.reason),
-    });
+    const task = await this.ensureTask(taskId);
 
+    // If branching is required, create the worktree BEFORE transitioning
     if (task.requires_branching) {
       const project = await this.ensureProject(task.project_id);
       if (!project.workspace_path) {
@@ -592,16 +568,30 @@ export class ProjectService {
       const branchName = `task/${task.id}`;
       const repoPath = path.join(project.workspace_path, "main");
       const worktreePath = path.join(project.workspace_path, "worktrees", `task-${task.id}`);
-      await createWorktree(repoPath, worktreePath, branchName);
+      try {
+        await createWorktree(repoPath, worktreePath, branchName);
+      } catch (err) {
+        throw new Error(`Failed to create worktree for task ${task.id}: ${String(err)}`, {
+          cause: err,
+        });
+      }
       await execute("UPDATE project_tasks SET git_branch=?, worktree_path=? WHERE id=?", [
         branchName,
         worktreePath,
         task.id,
       ]);
-      task = await this.ensureTask(task.id);
     }
 
-    return task;
+    // Only transition to executing after worktree is successfully created
+    const updated = await this.transitionTaskStatus({
+      taskId,
+      toStatus: "executing",
+      allowedFrom: ["queue"],
+      actor: input.actor == null ? undefined : String(input.actor),
+      reason: input.reason == null ? "task started" : String(input.reason),
+    });
+
+    return updated;
   }
 
   async task_request_review(input: Record<string, unknown>) {
@@ -609,12 +599,16 @@ export class ProjectService {
     const taskId = Number.parseInt(String(input.taskId ?? input.id ?? ""), 10);
     const task = await this.ensureTask(taskId);
     if (!task.requires_human_review) {
-      return await this.task_approve({ ...input, taskId, reason: "auto-approved" });
+      return await this.task_complete({
+        ...input,
+        taskId,
+        reason: "auto-approved (no human review required)",
+      });
     }
     return await this.transitionTaskStatus({
       taskId,
       toStatus: "review_requested",
-      allowedFrom: ["implementing", "changes_requested"],
+      allowedFrom: ["executing"],
       actor: input.actor == null ? undefined : String(input.actor),
       reason: input.reason == null ? "review requested" : String(input.reason),
     });
@@ -623,16 +617,9 @@ export class ProjectService {
   async task_approve(input: Record<string, unknown>) {
     await this.init();
     const taskId = Number.parseInt(String(input.taskId ?? input.id ?? ""), 10);
-    const task = await this.ensureTask(taskId);
-    const allowedFrom: TaskStatus[] = ["review_requested"];
-    if (!task.requires_human_review) {
-      allowedFrom.push("implementing", "changes_requested");
-    }
-    return await this.transitionTaskStatus({
+    return await this.task_complete({
+      ...input,
       taskId,
-      toStatus: "approved",
-      allowedFrom,
-      actor: input.actor == null ? undefined : String(input.actor),
       reason: input.reason == null ? "approved" : String(input.reason),
     });
   }
@@ -640,6 +627,10 @@ export class ProjectService {
   async task_request_changes(input: Record<string, unknown>) {
     await this.init();
     const taskId = Number.parseInt(String(input.taskId ?? input.id ?? ""), 10);
+    const feedback = input.reviewFeedback == null ? null : String(input.reviewFeedback);
+    if (feedback) {
+      await execute("UPDATE project_tasks SET review_feedback=? WHERE id=?", [feedback, taskId]);
+    }
     return await this.transitionTaskStatus({
       taskId,
       toStatus: "changes_requested",
@@ -649,114 +640,105 @@ export class ProjectService {
     });
   }
 
-  async task_merge(input: Record<string, unknown>) {
-    await this.init();
-    const taskId = Number.parseInt(String(input.taskId ?? input.id ?? ""), 10);
-    let task = await this.ensureTask(taskId);
-    const project = await this.ensureProject(task.project_id);
-
-    if (!task.requires_branching) {
-      const next = pickPostMergeStatus(task, project);
-      if (next === "done") {
-        return await this.task_complete({ ...input, taskId, reason: "completed without merge" });
-      }
-      return await this.transitionTaskStatus({
-        taskId,
-        toStatus: next,
-        allowedFrom: ["approved", "implementing"],
-        actor: input.actor == null ? undefined : String(input.actor),
-        reason: "advanced without merge",
-      });
-    }
-
-    task = await this.transitionTaskStatus({
-      taskId,
-      toStatus: "merging",
-      allowedFrom: ["approved", "merge_conflict"],
-      actor: input.actor == null ? undefined : String(input.actor),
-      reason: input.reason == null ? "merging" : String(input.reason),
-    });
-
-    if (!project.workspace_path || !task.git_branch) {
-      throw new Error("workspace_path and git_branch required for merge");
-    }
-
-    const repoPath = path.join(project.workspace_path, "main");
-    const merged = await mergeBranch(repoPath, task.git_branch);
-    if (!merged.success) {
-      if (merged.conflict) {
-        return await this.transitionTaskStatus({
-          taskId,
-          toStatus: "merge_conflict",
-          allowedFrom: ["merging"],
-          actor: input.actor == null ? undefined : String(input.actor),
-          reason: merged.output,
-        });
-      }
-      throw new Error(`Merge failed: ${merged.output}`);
-    }
-
-    const next = pickPostMergeStatus(task, project);
-    if (next === "done") {
-      await this.transitionTaskStatus({
-        taskId,
-        toStatus: "done",
-        allowedFrom: ["merging"],
-        actor: input.actor == null ? undefined : String(input.actor),
-        reason: merged.output,
-      });
-      await execute("UPDATE project_tasks SET completed_at=CURRENT_TIMESTAMP WHERE id=?", [taskId]);
-      return await this.ensureTask(taskId);
-    }
-
-    return await this.transitionTaskStatus({
-      taskId,
-      toStatus: next,
-      allowedFrom: ["merging"],
-      actor: input.actor == null ? undefined : String(input.actor),
-      reason: merged.output,
-    });
-  }
-
-  async task_resolve_conflict(input: Record<string, unknown>) {
+  /** Promote a task from planning to queue (human action) */
+  async task_enqueue(input: Record<string, unknown>) {
     await this.init();
     const taskId = Number.parseInt(String(input.taskId ?? input.id ?? ""), 10);
     return await this.transitionTaskStatus({
       taskId,
-      toStatus: "merging",
-      allowedFrom: ["merge_conflict"],
+      toStatus: "queue",
+      allowedFrom: ["planning", "changes_requested", "stalled"],
       actor: input.actor == null ? undefined : String(input.actor),
-      reason: input.reason == null ? "conflict resolved" : String(input.reason),
+      reason: input.reason == null ? "promoted to queue" : String(input.reason),
     });
   }
 
-  async task_build(input: Record<string, unknown>) {
+  /** Record an attempt result and transition accordingly (called by executor code, not LLM) */
+  async task_record_attempt(input: Record<string, unknown>) {
     await this.init();
     const taskId = Number.parseInt(String(input.taskId ?? input.id ?? ""), 10);
     const task = await this.ensureTask(taskId);
-    const project = await this.ensureProject(task.project_id);
-    if (!project.has_build_step) {
-      throw new Error("project has_build_step is false");
-    }
-    return await this.transitionTaskStatus({
-      taskId,
-      toStatus: project.has_deploy_step ? "deploying" : "done",
-      allowedFrom: ["building", "merging", "approved"],
-      actor: input.actor == null ? undefined : String(input.actor),
-      reason: input.reason == null ? "build complete" : String(input.reason),
-    });
-  }
+    const outcome = String(input.outcome ?? "failed") as
+      | "success"
+      | "partial"
+      | "failed"
+      | "abandoned";
+    const summary = String(input.summary ?? "");
+    const errorLog = input.errorLog == null ? null : String(input.errorLog);
+    const filesChanged = input.filesChanged == null ? null : String(input.filesChanged);
+    const durationMs = Number.isFinite(Number(input.durationMs)) ? Number(input.durationMs) : null;
+    const gitBranch = input.gitBranch == null ? null : String(input.gitBranch);
+    const gitDiffSummary = input.gitDiffSummary == null ? null : String(input.gitDiffSummary);
+    const learnings = input.learnings == null ? null : String(input.learnings);
 
-  async task_deploy(input: Record<string, unknown>) {
-    await this.init();
-    const taskId = Number.parseInt(String(input.taskId ?? input.id ?? ""), 10);
-    return await this.transitionTaskStatus({
-      taskId,
-      toStatus: "done",
-      allowedFrom: ["deploying", "building", "merging", "approved"],
-      actor: input.actor == null ? undefined : String(input.actor),
-      reason: input.reason == null ? "deploy complete" : String(input.reason),
-    });
+    // Record the attempt
+    await execute(
+      `INSERT INTO task_attempts (task_id, session_key, model, summary, outcome, error_log, files_changed, duration_ms, git_branch, git_diff_summary)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        taskId,
+        input.sessionKey == null ? null : String(input.sessionKey),
+        input.model == null ? null : String(input.model),
+        summary,
+        outcome,
+        errorLog,
+        filesChanged,
+        durationMs,
+        gitBranch,
+        gitDiffSummary,
+      ],
+    );
+
+    // Update task attempt tracking
+    const newCount = task.attempt_count + 1;
+    const notes = learnings
+      ? task.execution_notes
+        ? task.execution_notes + "\n---\n" + learnings
+        : learnings
+      : task.execution_notes;
+
+    await execute(
+      `UPDATE project_tasks SET attempt_count=?, last_attempt_at=CURRENT_TIMESTAMP, execution_notes=? WHERE id=?`,
+      [newCount, notes, taskId],
+    );
+
+    // Transition based on outcome
+    if (outcome === "success") {
+      if (task.requires_human_review) {
+        return await this.transitionTaskStatus({
+          taskId,
+          toStatus: "review_requested",
+          allowedFrom: ["executing"],
+          actor: "executor",
+          reason: summary,
+        });
+      } else {
+        return await this.task_complete({
+          taskId,
+          actor: "executor",
+          reason: "auto-approved: " + summary,
+        });
+      }
+    } else {
+      // Failed / partial / abandoned
+      if (newCount >= task.max_attempts) {
+        return await this.transitionTaskStatus({
+          taskId,
+          toStatus: "stalled",
+          allowedFrom: ["executing"],
+          actor: "executor",
+          reason: `stalled after ${newCount}/${task.max_attempts} attempts: ${summary}`,
+        });
+      } else {
+        return await this.transitionTaskStatus({
+          taskId,
+          toStatus: "queue",
+          allowedFrom: ["executing"],
+          actor: "executor",
+          reason: `attempt ${newCount}/${task.max_attempts} failed: ${summary}`,
+        });
+      }
+    }
   }
 
   async task_complete(input: Record<string, unknown>) {
@@ -766,15 +748,12 @@ export class ProjectService {
       taskId,
       toStatus: "done",
       allowedFrom: [
-        "requirements",
-        "implementing",
+        "planning",
+        "queue",
+        "executing",
         "review_requested",
-        "approved",
         "changes_requested",
-        "merging",
-        "building",
-        "deploying",
-        "merge_conflict",
+        "stalled",
       ],
       actor: input.actor == null ? undefined : String(input.actor),
       reason: input.reason == null ? "completed" : String(input.reason),
@@ -793,15 +772,12 @@ export class ProjectService {
       taskId,
       toStatus: "cancelled",
       allowedFrom: [
-        "requirements",
-        "implementing",
+        "planning",
+        "queue",
+        "executing",
         "review_requested",
-        "approved",
         "changes_requested",
-        "merging",
-        "merge_conflict",
-        "building",
-        "deploying",
+        "stalled",
         "blocked",
         "done",
       ],
@@ -838,15 +814,12 @@ export class ProjectService {
       taskId,
       toStatus: "blocked",
       allowedFrom: [
-        "requirements",
-        "implementing",
+        "planning",
+        "queue",
+        "executing",
         "review_requested",
-        "approved",
         "changes_requested",
-        "merging",
-        "merge_conflict",
-        "building",
-        "deploying",
+        "stalled",
       ],
       actor: input.actor == null ? undefined : String(input.actor),
       reason: input.reason == null ? "blocked" : String(input.reason),
@@ -860,7 +833,7 @@ export class ProjectService {
     if (task.status !== "blocked") {
       throw new Error("task is not blocked");
     }
-    const restore = task.status_before_blocked ?? "requirements";
+    const restore = task.status_before_blocked ?? "planning";
     await execute(
       "UPDATE project_tasks SET status_before_blocked=NULL, block_reason=NULL WHERE id=?",
       [taskId],

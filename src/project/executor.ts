@@ -6,23 +6,18 @@
  * completion, parses the structured JSON response, and updates the DB.
  */
 
-import { query, execute, getProjectPool } from "./db.js";
-import type {
-  TaskRow,
-  TaskAttemptRow,
-  ProjectRow,
-  MemoryRow,
-  CommandRow,
-} from "./types.js";
-import { callGatewayCli } from "../gateway/call.js";
-import { createWorktree } from "./git.js";
 import crypto from "node:crypto";
 import path from "node:path";
+import { callGatewayCli } from "../gateway/call.js";
+import { query, execute, getProjectPool } from "./db.js";
+import { createWorktree } from "./git.js";
+import type { TaskRow, TaskAttemptRow, ProjectRow, MemoryRow, CommandRow } from "./types.js";
 
 // ─── Configuration ───────────────────────────────────────────────
 
 const GATEWAY_URL = "ws://127.0.0.1:18789";
-const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "8bc8eefc48f92ca1cab5ac300d31647d4a0bfe2213e857ff";
+const GATEWAY_TOKEN =
+  process.env.OPENCLAW_GATEWAY_TOKEN || "8bc8eefc48f92ca1cab5ac300d31647d4a0bfe2213e857ff";
 const MODEL = "anthropic/claude-opus-4-6";
 const AGENT_TIMEOUT_SECONDS = 600; // 10 min max per task
 
@@ -32,10 +27,10 @@ const TELEGRAM_GROUP_ID = "-1003885951942";
 // ─── DB Queries ──────────────────────────────────────────────────
 
 async function isAnyTaskExecuting(): Promise<boolean> {
-  const rows = await query<TaskRow>(
-    "SELECT * FROM project_tasks WHERE status = 'executing'"
-  );
-  if (rows.length === 0) return false;
+  const rows = await query<TaskRow>("SELECT * FROM project_tasks WHERE status = 'executing'");
+  if (rows.length === 0) {
+    return false;
+  }
 
   const STALE_MS = 15 * 60 * 1000;
   for (const task of rows) {
@@ -44,9 +39,21 @@ async function isAnyTaskExecuting(): Promise<boolean> {
       console.log(`[executor] Recovering stale task #${task.id} (stuck in executing)`);
       const newCount = task.attempt_count + 1;
       if (newCount >= task.max_attempts) {
-        await transitionTask(task.id, "executing", "stalled", "executor", "Stale execution recovered");
+        await transitionTask(
+          task.id,
+          "executing",
+          "stalled",
+          "executor",
+          "Stale execution recovered",
+        );
       } else {
-        await transitionTask(task.id, "executing", "queue", "executor", "Stale execution recovered, re-queued");
+        await transitionTask(
+          task.id,
+          "executing",
+          "queue",
+          "executor",
+          "Stale execution recovered, re-queued",
+        );
       }
       return false;
     }
@@ -56,34 +63,33 @@ async function isAnyTaskExecuting(): Promise<boolean> {
 
 async function pickNextTask(): Promise<TaskRow | null> {
   const rows = await query<TaskRow>(
-    "SELECT * FROM project_tasks WHERE status = 'queue' ORDER BY priority DESC, created_at ASC LIMIT 1"
+    "SELECT * FROM project_tasks WHERE status = 'queue' ORDER BY priority DESC, created_at ASC LIMIT 1",
   );
   return rows[0] || null;
 }
 
 async function getProject(id: string): Promise<ProjectRow | null> {
-  const rows = await query<ProjectRow>(
-    "SELECT * FROM projects WHERE id = ?", [id]
-  );
+  const rows = await query<ProjectRow>("SELECT * FROM projects WHERE id = ?", [id]);
   return rows[0] || null;
 }
 
 async function getProjectMemory(projectId: string): Promise<MemoryRow[]> {
   return query<MemoryRow>(
-    "SELECT * FROM project_memory WHERE project_id = ? ORDER BY id DESC LIMIT 20", [projectId]
+    "SELECT * FROM project_memory WHERE project_id = ? ORDER BY id DESC LIMIT 20",
+    [projectId],
   );
 }
 
 async function getProjectCommands(projectId: string): Promise<CommandRow[]> {
-  return query<CommandRow>(
-    "SELECT * FROM project_commands WHERE project_id = ? ORDER BY id", [projectId]
-  );
+  return query<CommandRow>("SELECT * FROM project_commands WHERE project_id = ? ORDER BY id", [
+    projectId,
+  ]);
 }
 
 async function getTaskAttempts(taskId: number): Promise<TaskAttemptRow[]> {
-  return query<TaskAttemptRow>(
-    "SELECT * FROM task_attempts WHERE task_id = ? ORDER BY id", [taskId]
-  );
+  return query<TaskAttemptRow>("SELECT * FROM task_attempts WHERE task_id = ? ORDER BY id", [
+    taskId,
+  ]);
 }
 
 async function transitionTask(
@@ -95,14 +101,14 @@ async function transitionTask(
 ): Promise<void> {
   const result = await execute(
     "UPDATE project_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?",
-    [toStatus, taskId, fromStatus]
+    [toStatus, taskId, fromStatus],
   );
   if (result.affectedRows !== 1) {
     throw new Error(`Failed to transition task ${taskId}: ${fromStatus} → ${toStatus}`);
   }
   await execute(
     "INSERT INTO task_status_history (task_id, from_status, to_status, actor, reason) VALUES (?, ?, ?, ?, ?)",
-    [taskId, fromStatus, toStatus, actor, reason]
+    [taskId, fromStatus, toStatus, actor, reason],
   );
 }
 
@@ -119,11 +125,11 @@ async function recordAttempt(
   await execute(
     `INSERT INTO task_attempts (task_id, outcome, summary, model, duration_ms, error_log, files_changed, learnings)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [taskId, outcome, summary, model, durationMs, errorLog, filesChanged, learnings]
+    [taskId, outcome, summary, model, durationMs, errorLog, filesChanged, learnings],
   );
   await execute(
     "UPDATE project_tasks SET attempt_count = attempt_count + 1, last_attempt_at = CURRENT_TIMESTAMP WHERE id = ?",
-    [taskId]
+    [taskId],
   );
 }
 
@@ -138,7 +144,9 @@ async function notify(html: string, topicId?: number | null): Promise<void> {
       text: html,
       parse_mode: "HTML",
     };
-    if (topicId) body.message_thread_id = topicId;
+    if (topicId) {
+      body.message_thread_id = topicId;
+    }
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -163,9 +171,15 @@ function buildTaskPrompt(
   sections.push(`# Task Execution Brief\n`);
   sections.push(`## Project`);
   sections.push(`- **Name:** ${project.name}`);
-  if (project.description) sections.push(`- **Description:** ${project.description}`);
-  if (project.workspace_path) sections.push(`- **Workspace:** ${project.workspace_path}`);
-  if (project.github_remote) sections.push(`- **GitHub:** ${project.github_remote}`);
+  if (project.description) {
+    sections.push(`- **Description:** ${project.description}`);
+  }
+  if (project.workspace_path) {
+    sections.push(`- **Workspace:** ${project.workspace_path}`);
+  }
+  if (project.github_remote) {
+    sections.push(`- **GitHub:** ${project.github_remote}`);
+  }
   sections.push("");
 
   if (memory.length > 0) {
@@ -179,7 +193,9 @@ function buildTaskPrompt(
   if (commands.length > 0) {
     sections.push(`## Available Commands`);
     for (const cmd of commands) {
-      sections.push(`- **${cmd.label}** (${cmd.category}): \`${cmd.command}\`${cmd.cwd ? ` (cwd: ${cmd.cwd})` : ""}${cmd.description ? ` — ${cmd.description}` : ""}`);
+      sections.push(
+        `- **${cmd.label}** (${cmd.category}): \`${cmd.command}\`${cmd.cwd ? ` (cwd: ${cmd.cwd})` : ""}${cmd.description ? ` — ${cmd.description}` : ""}`,
+      );
     }
     sections.push("");
   }
@@ -203,19 +219,29 @@ function buildTaskPrompt(
       const a = attempts[i];
       sections.push(`### Attempt ${i + 1} — ${a.outcome} (${a.model || "unknown"})`);
       sections.push(a.summary);
-      if (a.error_log) sections.push(`**Error:** ${a.error_log}`);
-      if (a.files_changed) sections.push(`**Files changed:** ${a.files_changed}`);
+      if (a.error_log) {
+        sections.push(`**Error:** ${a.error_log}`);
+      }
+      if (a.files_changed) {
+        sections.push(`**Files changed:** ${a.files_changed}`);
+      }
       sections.push("");
     }
   }
 
-  const workDir = task.worktree_path || (project.workspace_path ? `${project.workspace_path}main` : "current directory");
+  const workDir =
+    task.worktree_path ||
+    (project.workspace_path ? `${project.workspace_path}main` : "current directory");
 
   sections.push(`## Instructions`);
-  sections.push(`You are an autonomous task executor. You have access to tools: read files, write files, execute shell commands.`);
+  sections.push(
+    `You are an autonomous task executor. You have access to tools: read files, write files, execute shell commands.`,
+  );
   sections.push(`1. Work within this directory: ${workDir}`);
   if (task.worktree_path) {
-    sections.push(`   - This is an isolated git worktree on branch \`${task.git_branch}\`. Commit your changes frequently.`);
+    sections.push(
+      `   - This is an isolated git worktree on branch \`${task.git_branch}\`. Commit your changes frequently.`,
+    );
     sections.push(`   - The main branch is at: ${project.workspace_path}main`);
   }
   sections.push(`2. Make the required code changes.`);
@@ -223,16 +249,24 @@ function buildTaskPrompt(
   sections.push(`4. When done, output your final result as a JSON block in this EXACT format:`);
   sections.push("");
   sections.push("```json");
-  sections.push(JSON.stringify({
-    status: "success | failure",
-    summary: "Concise description of what was done",
-    files_changed: ["path/to/file1.ts"],
-    error_log: "Only on failure — what went wrong",
-    learnings: "What future attempts should know",
-  }, null, 2));
+  sections.push(
+    JSON.stringify(
+      {
+        status: "success | failure",
+        summary: "Concise description of what was done",
+        files_changed: ["path/to/file1.ts"],
+        error_log: "Only on failure — what went wrong",
+        learnings: "What future attempts should know",
+      },
+      null,
+      2,
+    ),
+  );
   sections.push("```");
   sections.push("");
-  sections.push(`IMPORTANT: Your very last message MUST contain this JSON block. The system parses it automatically.`);
+  sections.push(
+    `IMPORTANT: Your very last message MUST contain this JSON block. The system parses it automatically.`,
+  );
 
   return sections.join("\n");
 }
@@ -285,8 +319,12 @@ async function waitForAgent(
         params: { runId },
         timeoutMs: 10_000,
       });
-      if (result.status === "done" || result.status === "error") return result;
-    } catch { /* retry */ }
+      if (result.status === "done" || result.status === "error") {
+        return result;
+      }
+    } catch {
+      /* retry */
+    }
     await new Promise((r) => setTimeout(r, 5_000));
   }
   return { status: "timeout", error: "Agent execution timed out" };
@@ -303,7 +341,9 @@ async function getAgentResponse(sessionKey: string): Promise<string | null> {
     });
     const messages = result.messages || [];
     for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === "assistant") return messages[i].content;
+      if (messages[i].role === "assistant") {
+        return messages[i].content;
+      }
     }
     console.log("[executor] chat.history: no messages, keys:", Object.keys(result || {}));
   } catch (err) {
@@ -320,7 +360,9 @@ function parseAgentResult(text: string): {
   learnings: string | null;
 } | null {
   const jsonMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-  if (!jsonMatch) return null;
+  if (!jsonMatch) {
+    return null;
+  }
   try {
     const parsed = JSON.parse(jsonMatch[1]);
     return {
@@ -330,7 +372,9 @@ function parseAgentResult(text: string): {
       error_log: parsed.error_log || null,
       learnings: parsed.learnings || null,
     };
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 // ─── Main Executor ───────────────────────────────────────────────
@@ -373,19 +417,25 @@ export async function executeNextTask(): Promise<ExecutorResult> {
     try {
       await createWorktree(repoPath, worktreePath, branchName);
       await execute("UPDATE project_tasks SET git_branch=?, worktree_path=? WHERE id=?", [
-        branchName, worktreePath, task.id,
+        branchName,
+        worktreePath,
+        task.id,
       ]);
       task.git_branch = branchName;
       task.worktree_path = worktreePath;
     } catch (err) {
-      return { action: "error", taskId: task.id, message: `Worktree creation failed: ${err}` };
+      return {
+        action: "error",
+        taskId: task.id,
+        message: `Worktree creation failed: ${String(err)}`,
+      };
     }
   }
 
   try {
     await transitionTask(task.id, "queue", "executing", "executor", "automated pickup");
   } catch (err) {
-    return { action: "error", taskId: task.id, message: `Transition failed: ${err}` };
+    return { action: "error", taskId: task.id, message: `Transition failed: ${String(err)}` };
   }
 
   const [memory, commands, attempts] = await Promise.all([
@@ -423,9 +473,24 @@ export async function executeNextTask(): Promise<ExecutorResult> {
 
     const result = parseAgentResult(response);
     if (!result) {
-      await recordAttempt(task.id, "unknown", "Agent did not produce structured output", MODEL, durationMs, null, null, null);
+      await recordAttempt(
+        task.id,
+        "unknown",
+        "Agent did not produce structured output",
+        MODEL,
+        durationMs,
+        null,
+        null,
+        null,
+      );
       if (task.requires_human_review) {
-        await transitionTask(task.id, "executing", "review_requested", "executor", "Completed but no structured output");
+        await transitionTask(
+          task.id,
+          "executing",
+          "review_requested",
+          "executor",
+          "Completed but no structured output",
+        );
       } else {
         await transitionTask(task.id, "executing", "done", "executor", "Completed");
       }
@@ -433,12 +498,24 @@ export async function executeNextTask(): Promise<ExecutorResult> {
         `✅ <b>Done:</b> ${esc(task.title)}\n<i>No structured output, sent to review</i>`,
         project.telegram_topic_id,
       );
-      return { action: "executed", taskId: task.id, projectId: project.id, outcome: "review", message: "Completed without structured output" };
+      return {
+        action: "executed",
+        taskId: task.id,
+        projectId: project.id,
+        outcome: "review",
+        message: "Completed without structured output",
+      };
     }
 
     await recordAttempt(
-      task.id, result.status, result.summary, MODEL, durationMs,
-      result.error_log, result.files_changed?.join(", ") || null, result.learnings,
+      task.id,
+      result.status,
+      result.summary,
+      MODEL,
+      durationMs,
+      result.error_log,
+      result.files_changed?.join(", ") || null,
+      result.learnings,
     );
 
     if (result.learnings) {
@@ -458,28 +535,61 @@ export async function executeNextTask(): Promise<ExecutorResult> {
         `✅ <b>Success:</b> ${esc(task.title)}\n<i>${esc(result.summary)}</i>`,
         project.telegram_topic_id,
       );
-      return { action: "executed", taskId: task.id, projectId: project.id, outcome: "success", message: result.summary };
+      return {
+        action: "executed",
+        taskId: task.id,
+        projectId: project.id,
+        outcome: "success",
+        message: result.summary,
+      };
     } else {
       const newCount = task.attempt_count + 1;
       if (newCount >= task.max_attempts) {
-        await transitionTask(task.id, "executing", "stalled", "executor", `Failed after ${newCount} attempts: ${result.summary}`);
+        await transitionTask(
+          task.id,
+          "executing",
+          "stalled",
+          "executor",
+          `Failed after ${newCount} attempts: ${result.summary}`,
+        );
         await notify(
           `❌ <b>Stalled:</b> ${esc(task.title)}\n<i>Failed after ${newCount} attempts</i>`,
           project.telegram_topic_id,
         );
       } else {
-        await transitionTask(task.id, "executing", "queue", "executor", `Attempt failed, re-queued: ${result.summary}`);
+        await transitionTask(
+          task.id,
+          "executing",
+          "queue",
+          "executor",
+          `Attempt failed, re-queued: ${result.summary}`,
+        );
         await notify(
           `🔄 <b>Retry:</b> ${esc(task.title)}\n<i>Attempt ${newCount}/${task.max_attempts} failed, re-queued</i>`,
           project.telegram_topic_id,
         );
       }
-      return { action: "executed", taskId: task.id, projectId: project.id, outcome: "failure", message: result.summary };
+      return {
+        action: "executed",
+        taskId: task.id,
+        projectId: project.id,
+        outcome: "failure",
+        message: result.summary,
+      };
     }
   } catch (err) {
     const durationMs = Date.now() - startTime;
     const errMsg = err instanceof Error ? err.message : String(err);
-    await recordAttempt(task.id, "abandoned", `Agent error: ${errMsg}`, MODEL, durationMs, errMsg, null, null);
+    await recordAttempt(
+      task.id,
+      "abandoned",
+      `Agent error: ${errMsg}`,
+      MODEL,
+      durationMs,
+      errMsg,
+      null,
+      null,
+    );
 
     const newCount = task.attempt_count + 1;
     if (newCount >= task.max_attempts) {
@@ -500,8 +610,7 @@ export async function executeNextTask(): Promise<ExecutorResult> {
 // ─── CLI Entry ───────────────────────────────────────────────────
 
 const isDirectRun =
-  process.argv[1]?.endsWith("executor.js") ||
-  process.argv[1]?.endsWith("executor.ts");
+  process.argv[1]?.endsWith("executor.js") || process.argv[1]?.endsWith("executor.ts");
 
 if (isDirectRun) {
   executeNextTask()
@@ -512,6 +621,9 @@ if (isDirectRun) {
     .then(() => process.exit(0))
     .catch((err) => {
       console.error("[executor] Fatal:", err);
-      getProjectPool().end().catch(() => {}).then(() => process.exit(1));
+      void getProjectPool()
+        .end()
+        .catch(() => {})
+        .then(() => process.exit(1));
     });
 }

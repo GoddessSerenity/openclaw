@@ -53,21 +53,26 @@ CREATE TABLE IF NOT EXISTS project_tasks (
   id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
   project_id VARCHAR(64) NOT NULL,
   title VARCHAR(512) NOT NULL,
+  slug VARCHAR(128) NULL,
   description TEXT NULL,
-  status ENUM('requirements','implementing','review_requested','approved','changes_requested','merging','merge_conflict','building','deploying','done','cancelled','blocked') NOT NULL DEFAULT 'requirements',
-  status_before_blocked ENUM('requirements','implementing','review_requested','approved','changes_requested','merging','merge_conflict','building','deploying') NULL COMMENT 'Saved when entering blocked state',
+  status ENUM('planning','queue','executing','review_requested','changes_requested','stalled','done','cancelled','blocked','requirements','implementing','approved','merging','merge_conflict','building','deploying') NOT NULL DEFAULT 'planning',
+  status_before_blocked VARCHAR(32) NULL COMMENT 'Saved when entering blocked state',
   task_type ENUM('feature','bugfix','iteration','hotfix','chore') NOT NULL DEFAULT 'feature',
   requires_branching BOOLEAN NOT NULL DEFAULT TRUE,
   requires_human_review BOOLEAN NOT NULL DEFAULT TRUE,
   priority INT NOT NULL DEFAULT 0,
   phase VARCHAR(64) NULL,
-  assigned_model VARCHAR(64) NULL,
   git_branch VARCHAR(255) NULL,
   worktree_path VARCHAR(512) NULL,
   dev_server_url VARCHAR(512) NULL,
   review_notes TEXT NULL,
   review_feedback TEXT NULL,
   block_reason TEXT NULL,
+  max_attempts INT NOT NULL DEFAULT 3,
+  attempt_count INT NOT NULL DEFAULT 0,
+  last_attempt_at DATETIME NULL,
+  execution_notes TEXT NULL COMMENT 'Accumulated learnings across attempts',
+  estimated_complexity ENUM('trivial','small','medium','large') NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   completed_at DATETIME NULL,
@@ -107,6 +112,11 @@ CREATE TABLE IF NOT EXISTS task_attempts (
   model VARCHAR(64) NULL COMMENT 'Which model was used',
   summary TEXT NOT NULL COMMENT 'Auto-generated summary of what was tried',
   outcome ENUM('success','partial','failed','abandoned') NOT NULL,
+  error_log TEXT NULL COMMENT 'Structured error output from agent',
+  files_changed TEXT NULL COMMENT 'JSON array of file paths modified',
+  duration_ms INT NULL,
+  git_branch VARCHAR(255) NULL,
+  git_diff_summary TEXT NULL COMMENT 'Short diff stat output',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_attempts_task (task_id),
   CONSTRAINT fk_attempts_task FOREIGN KEY (task_id) REFERENCES project_tasks(id) ON DELETE CASCADE ON UPDATE CASCADE
@@ -161,7 +171,39 @@ export async function runMigrations(): Promise<void> {
     for (const statement of CREATE_TABLE_STATEMENTS) {
       await projectConnection.execute(statement);
     }
+    // Run ALTER migrations for existing databases
+    for (const alt of ALTER_MIGRATIONS) {
+      try {
+        await projectConnection.execute(alt);
+      } catch {
+        // Ignore errors (column already exists, etc.)
+      }
+    }
   } finally {
     await projectConnection.end();
   }
 }
+
+/** Idempotent ALTER statements for upgrading existing schemas */
+const ALTER_MIGRATIONS: string[] = [
+  // Add new task statuses to ENUM
+  `ALTER TABLE project_tasks MODIFY COLUMN status ENUM('planning','queue','executing','review_requested','changes_requested','stalled','done','cancelled','blocked','requirements','implementing','approved','merging','merge_conflict','building','deploying') NOT NULL DEFAULT 'planning'`,
+  // Widen status_before_blocked to VARCHAR to support all statuses
+  `ALTER TABLE project_tasks MODIFY COLUMN status_before_blocked VARCHAR(32) NULL`,
+  // New task columns
+  `ALTER TABLE project_tasks ADD COLUMN max_attempts INT NOT NULL DEFAULT 3`,
+  `ALTER TABLE project_tasks ADD COLUMN attempt_count INT NOT NULL DEFAULT 0`,
+  `ALTER TABLE project_tasks ADD COLUMN last_attempt_at DATETIME NULL`,
+  `ALTER TABLE project_tasks ADD COLUMN execution_notes TEXT NULL COMMENT 'Accumulated learnings across attempts'`,
+  `ALTER TABLE project_tasks ADD COLUMN estimated_complexity ENUM('trivial','small','medium','large') NULL`,
+  // New attempt columns
+  `ALTER TABLE task_attempts ADD COLUMN error_log TEXT NULL`,
+  `ALTER TABLE task_attempts ADD COLUMN files_changed TEXT NULL`,
+  `ALTER TABLE task_attempts ADD COLUMN duration_ms INT NULL`,
+  `ALTER TABLE task_attempts ADD COLUMN git_branch VARCHAR(255) NULL`,
+  `ALTER TABLE task_attempts ADD COLUMN git_diff_summary TEXT NULL`,
+  // Migrate old statuses to new ones
+  `UPDATE project_tasks SET status = 'planning' WHERE status = 'requirements'`,
+  `UPDATE project_tasks SET status = 'queue' WHERE status IN ('implementing', 'approved')`,
+  `UPDATE project_tasks SET status = 'executing' WHERE status IN ('merging', 'merge_conflict', 'building', 'deploying')`,
+];

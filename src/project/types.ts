@@ -11,15 +11,12 @@ export const CMD_RUN_MODES = ["exec", "task"] as const;
 export type CmdRunMode = (typeof CMD_RUN_MODES)[number];
 
 export const TASK_STATUSES = [
-  "requirements",
-  "implementing",
+  "planning",
+  "queue",
+  "executing",
   "review_requested",
-  "approved",
   "changes_requested",
-  "merging",
-  "merge_conflict",
-  "building",
-  "deploying",
+  "stalled",
   "done",
   "cancelled",
   "blocked",
@@ -88,15 +85,12 @@ export const PROJECT_STATE_TRANSITIONS: Record<ProjectState, ProjectState[]> = {
 };
 
 export const TASK_STATUS_TRANSITIONS: Record<string, TaskStatus[]> = {
-  requirements: ["implementing"],
-  implementing: ["review_requested", "approved"],
-  review_requested: ["approved", "changes_requested"],
-  changes_requested: ["review_requested"],
-  approved: ["merging"],
-  merging: ["merge_conflict", "building", "deploying", "done"],
-  merge_conflict: ["merging"],
-  building: ["deploying", "done"],
-  deploying: ["done"],
+  planning: ["queue"],
+  queue: ["executing"],
+  executing: ["review_requested", "done", "queue", "stalled"],
+  review_requested: ["done", "changes_requested"],
+  changes_requested: ["queue", "cancelled"],
+  stalled: ["queue", "cancelled"],
 };
 
 export interface ProjectRow {
@@ -140,6 +134,7 @@ export interface TaskRow {
   id: number;
   project_id: string;
   title: string;
+  slug: string | null;
   description: string | null;
   status: TaskStatus;
   status_before_blocked: TaskStatus | null;
@@ -148,13 +143,17 @@ export interface TaskRow {
   requires_human_review: boolean;
   priority: number;
   phase: string | null;
-  assigned_model: string | null;
   git_branch: string | null;
   worktree_path: string | null;
   dev_server_url: string | null;
   review_notes: string | null;
   review_feedback: string | null;
   block_reason: string | null;
+  max_attempts: number;
+  attempt_count: number;
+  last_attempt_at: Date | null;
+  execution_notes: string | null;
+  estimated_complexity: "trivial" | "small" | "medium" | "large" | null;
   created_at: Date;
   updated_at: Date;
   completed_at: Date | null;
@@ -182,6 +181,11 @@ export interface TaskAttemptRow {
   model: string | null;
   summary: string;
   outcome: "success" | "partial" | "failed" | "abandoned";
+  error_log: string | null;
+  files_changed: string | null;
+  duration_ms: number | null;
+  git_branch: string | null;
+  git_diff_summary: string | null;
   created_at: Date;
 }
 

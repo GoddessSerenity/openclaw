@@ -31,13 +31,11 @@ const PROJECT_ACTIONS = [
   "task_update",
   "task_next",
   "task_start",
+  "task_enqueue",
   "task_request_review",
   "task_approve",
   "task_request_changes",
-  "task_merge",
-  "task_resolve_conflict",
-  "task_build",
-  "task_deploy",
+  "task_record_attempt",
   "task_complete",
   "task_cancel",
   "task_block",
@@ -86,7 +84,6 @@ const ProjectToolSchema = Type.Object({
   requiresHumanReview: Type.Optional(Type.Boolean()),
   priority: Type.Optional(Type.Number()),
   phase: Type.Optional(Type.String()),
-  assignedModel: Type.Optional(Type.String()),
   reviewNotes: Type.Optional(Type.String()),
   reviewFeedback: Type.Optional(Type.String()),
   devServerUrl: Type.Optional(Type.String()),
@@ -136,7 +133,6 @@ export function createProjectTool(): AnyAgentTool {
         "title",
         "taskType",
         "phase",
-        "assignedModel",
         "reviewNotes",
         "reviewFeedback",
         "devServerUrl",
@@ -199,13 +195,11 @@ export function createProjectTool(): AnyAgentTool {
         case "task_update":
         case "task_next":
         case "task_start":
+        case "task_enqueue":
         case "task_request_review":
         case "task_approve":
         case "task_request_changes":
-        case "task_merge":
-        case "task_resolve_conflict":
-        case "task_build":
-        case "task_deploy":
+        case "task_record_attempt":
         case "task_complete":
         case "task_cancel":
         case "task_block":

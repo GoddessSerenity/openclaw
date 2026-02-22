@@ -1,7 +1,31 @@
 import { execFile as execFileCb } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCb);
+
+export async function initProjectRepo(
+  workspacePath: string,
+  githubRemote?: string | null,
+): Promise<void> {
+  const mainPath = path.join(workspacePath, "main");
+  const worktreesPath = path.join(workspacePath, "worktrees");
+
+  await fs.mkdir(mainPath, { recursive: true });
+  await fs.mkdir(worktreesPath, { recursive: true });
+
+  await execFile("git", ["-C", mainPath, "init"]);
+  await execFile("git", ["-C", mainPath, "checkout", "-b", "main"]);
+
+  await fs.writeFile(path.join(mainPath, "README.md"), `# Project\n`);
+  await execFile("git", ["-C", mainPath, "add", "."]);
+  await execFile("git", ["-C", mainPath, "commit", "-m", "Initial commit"]);
+
+  if (githubRemote) {
+    await execFile("git", ["-C", mainPath, "remote", "add", "origin", githubRemote]);
+  }
+}
 
 export async function createWorktree(
   repoPath: string,
