@@ -207,16 +207,16 @@ After every upstream merge, run `./scripts/verify-fork-patches.sh` to ensure not
 
 ### 16. Project management runtime tool
 
-**Commits:** c8b1f74e2, da86bffa7, 3c02dfe47
-**Description:** Full project management tool (`project`) backed by MariaDB. 38 actions covering project CRUD, links, stored commands, task state machine with git worktree support, task dependencies, status history, and per-project memory. Includes task executor for autonomous agent-driven task execution. Database: `openclaw_projects` with 8 tables.
+**Commits:** c8b1f74e2, da86bffa7, 3c02dfe47, fab4ac7ed
+**Description:** Full project management tool (`project`) backed by MariaDB. 46 actions covering project CRUD, links, stored commands, task state machine with git worktree support, task dependencies, status history, per-project memory, port assignments, and environment variables. Includes task executor for autonomous agent-driven task execution. Database: `openclaw_projects` with 10 tables.
 **Files:**
 
 - `src/project/db.ts` (new file — MariaDB connection pool)
-- `src/project/types.ts` (new file — all enums, row types, state machines)
-- `src/project/migrations.ts` (new file — idempotent SQL migrations)
+- `src/project/types.ts` (new file — all enums, row types, state machines, port/env types)
+- `src/project/migrations.ts` (new file — idempotent SQL migrations incl. project_ports, port_assignments, project_env)
 - `src/project/git.ts` (new file — worktree/branch helpers)
-- `src/project/service.ts` (new file — ProjectService with all 38 actions)
-- `src/project/executor.ts` (new file — autonomous task executor)
+- `src/project/service.ts` (new file — ProjectService with all 46 actions incl. port allocation, env injection)
+- `src/project/executor.ts` (new file — autonomous task executor with port map + env briefing)
 - `src/agents/tools/project-tool.ts` (new file — tool definition + schema)
 - `src/agents/openclaw-tools.ts` (tool registration)
 - `src/task-runner/types.ts` (added projectId field)
@@ -227,10 +227,17 @@ After every upstream merge, run `./scripts/verify-fork-patches.sh` to ensure not
 - `scripts/run-executor.sh` (new file — executor runner)
   **Signatures:**
 - `src/project/service.ts` EXISTS
+- `src/project/service.ts` CONTAINS `allocatePortsForTask`
+- `src/project/service.ts` CONTAINS `getProjectEnv`
 - `src/project/db.ts` EXISTS
 - `src/project/executor.ts` EXISTS
+- `src/project/executor.ts` CONTAINS `envBriefing`
 - `src/agents/tools/project-tool.ts` EXISTS
+- `src/agents/tools/project-tool.ts` CONTAINS `port_declare`
+- `src/agents/tools/project-tool.ts` CONTAINS `env_set`
 - `src/agents/openclaw-tools.ts` CONTAINS `project-tool`
+- `src/project/migrations.ts` CONTAINS `project_ports`
+- `src/project/migrations.ts` CONTAINS `project_env`
 - `package.json` CONTAINS `mysql2`
 - `src/task-runner/types.ts` CONTAINS `projectId`
 - `scripts/executor-loop.sh` EXISTS
