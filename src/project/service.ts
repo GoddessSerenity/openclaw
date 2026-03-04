@@ -1,9 +1,10 @@
 /* eslint-disable @typescript-eslint/no-base-to-string */
 import { execFile as execFileCb } from "node:child_process";
+import net from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
 import { getTaskRunnerService } from "../task-runner/service.js";
-import { execute, query } from "./db.js";
+import { execute, getProjectPool, query } from "./db.js";
 import { createWorktree, initProjectRepo, removeWorktree } from "./git.js";
 import { runMigrations } from "./migrations.js";
 import {
@@ -11,9 +12,13 @@ import {
   MEMORY_CATEGORIES,
   type MemoryCategory,
   type MemoryRow,
+  type PortAssignmentRow,
+  type PortMapEntry,
   PROJECT_STATE_TRANSITIONS,
   type ProjectContext,
+  type ProjectEnvRow,
   type ProjectLinkRow,
+  type ProjectPortRow,
   type ProjectRow,
   TASK_TYPE_DEFAULTS,
   type TaskAttemptRow,
@@ -44,6 +49,25 @@ function asBool(value: unknown, fallback = false): boolean {
     }
   }
   return fallback;
+}
+
+// ─── Port Pool Configuration ─────────────────────────────────────
+const PORT_POOL_START = 4000;
+const PORT_POOL_END = 4999;
+
+function getGatewayHost(): string {
+  return process.env.OPENCLAW_HOST || "10.0.0.20";
+}
+
+/** Check if a port is bindable (not in use by another process) */
+function probePort(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once("error", () => resolve(false));
+    srv.listen(port, "0.0.0.0", () => {
+      srv.close(() => resolve(true));
+    });
+  });
 }
 
 export class ProjectService {
@@ -162,7 +186,7 @@ export class ProjectService {
       throw new Error("projectId required");
     }
     const project = await this.ensureProject(projectId);
-    const [links, commands, tasks, task_dependencies, recent_memory] = await Promise.all([
+    const [links, commands, tasks, task_dependencies, recent_memory, ports] = await Promise.all([
       query<ProjectLinkRow>("SELECT * FROM project_links WHERE project_id=? ORDER BY id DESC", [
         projectId,
       ]),
@@ -184,6 +208,9 @@ export class ProjectService {
         "SELECT * FROM project_memory WHERE project_id=? ORDER BY id DESC LIMIT 50",
         [projectId],
       ),
+      query<ProjectPortRow>("SELECT * FROM project_ports WHERE project_id=? ORDER BY label ASC", [
+        projectId,
+      ]),
     ]);
     return {
       project,
@@ -192,6 +219,7 @@ export class ProjectService {
       tasks,
       task_dependencies,
       recent_memory,
+      ports,
       running_processes: [],
     };
   }
@@ -412,6 +440,16 @@ export class ProjectService {
         .replaceAll("{task_id}", Number.isFinite(taskId) ? String(taskId) : "")
         .replaceAll("{label}", command.label);
 
+    // Build env vars: project env + port assignments
+    const projectEnv = await this.getProjectEnv(command.project_id);
+    let portEnv: Record<string, string> = {};
+    let portMap: PortMapEntry[] = [];
+    if (Number.isFinite(taskId)) {
+      portMap = await this.getPortMapForTask(taskId!);
+      portEnv = this.portMapToEnv(portMap);
+    }
+    const spawnEnv = { ...process.env, ...projectEnv, ...portEnv };
+
     if (command.run_mode === "task") {
       const taskRunner = getTaskRunnerService();
       const id = replaceTokens(
@@ -424,16 +462,18 @@ export class ProjectService {
         cwd: command.cwd ?? undefined,
         tags: ["project", command.project_id, command.label],
         projectId: command.project_id,
+        env: { ...projectEnv, ...portEnv },
       });
-      return { mode: "task", ...started };
+      return { mode: "task", ...started, ports: portMap };
     }
 
     const { stdout, stderr } = await execFile("bash", ["-lc", replaceTokens(command.command)], {
       cwd: command.cwd ?? undefined,
+      env: spawnEnv,
       maxBuffer: 20 * 1024 * 1024,
       timeout: Number.isFinite(Number(input.timeoutMs)) ? Number(input.timeoutMs) : undefined,
     });
-    return { mode: "exec", stdout, stderr };
+    return { mode: "exec", stdout, stderr, ports: portMap };
   }
 
   async task_add(input: Record<string, unknown>) {
@@ -479,7 +519,7 @@ export class ProjectService {
       throw new Error("taskId required");
     }
     const task = await this.ensureTask(taskId);
-    const [dependencies, attempts, status_history] = await Promise.all([
+    const [dependencies, attempts, status_history, port_assignments] = await Promise.all([
       query<TaskDependencyRow>(
         "SELECT * FROM project_task_dependencies WHERE task_id=? ORDER BY depends_on_id",
         [taskId],
@@ -491,8 +531,12 @@ export class ProjectService {
         "SELECT * FROM task_status_history WHERE task_id=? ORDER BY id DESC",
         [taskId],
       ),
+      query<PortAssignmentRow>(
+        "SELECT * FROM port_assignments WHERE task_id=? AND released_at IS NULL ORDER BY id",
+        [taskId],
+      ),
     ]);
-    return { task, dependencies, attempts, status_history };
+    return { task, dependencies, attempts, status_history, port_assignments };
   }
 
   async task_list(input: Record<string, unknown>) {
@@ -591,7 +635,10 @@ export class ProjectService {
       reason: input.reason == null ? "task started" : String(input.reason),
     });
 
-    return updated;
+    // Eagerly allocate ports from the project's declared port labels
+    const portMap = await this.allocatePortsForTask(taskId, task.project_id);
+
+    return { ...updated, port_map: portMap };
   }
 
   async task_request_review(input: Record<string, unknown>) {
@@ -759,6 +806,8 @@ export class ProjectService {
       reason: input.reason == null ? "completed" : String(input.reason),
     });
     await execute("UPDATE project_tasks SET completed_at=CURRENT_TIMESTAMP WHERE id=?", [taskId]);
+    // Release allocated ports
+    await this.releasePortsForTask(taskId);
     return updated;
   }
 
@@ -784,6 +833,9 @@ export class ProjectService {
       actor: input.actor == null ? undefined : String(input.actor),
       reason: input.reason == null ? "cancelled" : String(input.reason),
     });
+
+    // Release allocated ports
+    await this.releasePortsForTask(taskId);
 
     if (
       task.requires_branching &&
@@ -926,6 +978,352 @@ export class ProjectService {
     const id = Number.parseInt(String(input.memoryId ?? input.id ?? ""), 10);
     const result = await execute("DELETE FROM project_memory WHERE id=?", [id]);
     return { ok: result.affectedRows > 0, deleted: result.affectedRows };
+  }
+
+  // ─── Environment Variables ────────────────────────────────────────
+
+  async env_set(input: Record<string, unknown>) {
+    await this.init();
+    const projectId = String(input.projectId ?? "").trim();
+    const key = String(input.key ?? input.label ?? "").trim();
+    const value = String(input.value ?? "");
+    if (!projectId || !key) {
+      throw new Error("projectId and key required");
+    }
+    if (value === "") {
+      throw new Error("value required");
+    }
+    await this.ensureProject(projectId);
+    const isSecret = asBool(input.secret ?? input.isSecret, false);
+    const description = input.description == null ? null : String(input.description);
+    await execute(
+      "INSERT INTO project_env (project_id, `key`, value, is_secret, description) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE value=VALUES(value), is_secret=VALUES(is_secret), description=VALUES(description)",
+      [projectId, key, value, isSecret, description],
+    );
+    // Return with value redacted if secret
+    return {
+      project_id: projectId,
+      key,
+      value: isSecret ? "[REDACTED]" : value,
+      is_secret: isSecret,
+      description,
+    };
+  }
+
+  async env_remove(input: Record<string, unknown>) {
+    await this.init();
+    const projectId = String(input.projectId ?? "").trim();
+    const key = String(input.key ?? input.label ?? "").trim();
+    if (!projectId || !key) {
+      throw new Error("projectId and key required");
+    }
+    const result = await execute("DELETE FROM project_env WHERE project_id=? AND `key`=?", [
+      projectId,
+      key,
+    ]);
+    return { ok: result.affectedRows > 0, deleted: result.affectedRows };
+  }
+
+  async env_list(input: Record<string, unknown>) {
+    await this.init();
+    const projectId = String(input.projectId ?? "").trim();
+    if (!projectId) {
+      throw new Error("projectId required");
+    }
+    const rows = await query<ProjectEnvRow>(
+      "SELECT * FROM project_env WHERE project_id=? ORDER BY `key` ASC",
+      [projectId],
+    );
+    // Redact secret values
+    return rows.map((r) => ({
+      ...r,
+      value: r.is_secret ? "[REDACTED]" : r.value,
+    }));
+  }
+
+  /** Get all env vars for a project (with actual values, for injection) */
+  async getProjectEnv(projectId: string): Promise<Record<string, string>> {
+    const rows = await query<ProjectEnvRow>(
+      "SELECT `key`, value FROM project_env WHERE project_id=? ORDER BY `key`",
+      [projectId],
+    );
+    const env: Record<string, string> = {};
+    for (const row of rows) {
+      env[row.key] = row.value;
+    }
+    return env;
+  }
+
+  /** Get env var names for agent briefings (no secret values) */
+  async getProjectEnvBriefing(
+    projectId: string,
+  ): Promise<Array<{ key: string; is_secret: boolean; description: string | null }>> {
+    const rows = await query<ProjectEnvRow>(
+      "SELECT `key`, is_secret, description FROM project_env WHERE project_id=? ORDER BY `key`",
+      [projectId],
+    );
+    return rows.map((r) => ({
+      key: r.key,
+      is_secret: asBool(r.is_secret),
+      description: r.description,
+    }));
+  }
+
+  // ─── Port Management ──────────────────────────────────────────────
+
+  async port_declare(input: Record<string, unknown>) {
+    await this.init();
+    const projectId = String(input.projectId ?? "").trim();
+    const label = String(input.label ?? "")
+      .trim()
+      .toUpperCase();
+    if (!projectId || !label) {
+      throw new Error("projectId and label required");
+    }
+    if (!/^[A-Z][A-Z0-9_]*$/.test(label)) {
+      throw new Error("Label must match [A-Z][A-Z0-9_]*");
+    }
+    await this.ensureProject(projectId);
+    const description = input.description == null ? null : String(input.description);
+    await execute(
+      `INSERT INTO project_ports (project_id, label, description) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE description=VALUES(description)`,
+      [projectId, label, description],
+    );
+    return (
+      await query<ProjectPortRow>("SELECT * FROM project_ports WHERE project_id=? AND label=?", [
+        projectId,
+        label,
+      ])
+    )[0];
+  }
+
+  async port_undeclare(input: Record<string, unknown>) {
+    await this.init();
+    const projectId = String(input.projectId ?? "").trim();
+    const label = String(input.label ?? "")
+      .trim()
+      .toUpperCase();
+    if (!projectId || !label) {
+      throw new Error("projectId and label required");
+    }
+    // Check for active assignments
+    const active = await query<PortAssignmentRow>(
+      `SELECT pa.* FROM port_assignments pa
+       JOIN project_ports pp ON pp.id = pa.project_port_id
+       WHERE pp.project_id=? AND pp.label=? AND pa.released_at IS NULL`,
+      [projectId, label],
+    );
+    if (active.length > 0) {
+      throw new Error(
+        `Cannot undeclare port label "${label}" — ${active.length} active assignment(s)`,
+      );
+    }
+    const result = await execute("DELETE FROM project_ports WHERE project_id=? AND label=?", [
+      projectId,
+      label,
+    ]);
+    return { ok: result.affectedRows > 0, deleted: result.affectedRows };
+  }
+
+  async port_list(input: Record<string, unknown>) {
+    await this.init();
+    const projectId = input.projectId ? String(input.projectId).trim() : undefined;
+    const taskId = input.taskId != null ? Number(input.taskId) : undefined;
+    const host = getGatewayHost();
+
+    let sql = "SELECT * FROM port_assignments WHERE released_at IS NULL";
+    const params: unknown[] = [];
+    if (projectId) {
+      sql += " AND project_id=?";
+      params.push(projectId);
+    }
+    if (Number.isFinite(taskId)) {
+      sql += " AND task_id=?";
+      params.push(taskId);
+    }
+    sql += " ORDER BY port ASC";
+
+    const assignments = await query<PortAssignmentRow>(sql, params);
+
+    // Enrich with labels
+    if (assignments.length === 0) {
+      return [];
+    }
+    const portIds = assignments.map((a) => a.project_port_id);
+    const ports = await query<ProjectPortRow>(
+      `SELECT * FROM project_ports WHERE id IN (${portIds.map(() => "?").join(",")})`,
+      portIds,
+    );
+    const portMap = new Map(ports.map((p) => [p.id, p]));
+
+    return assignments.map((a) => ({
+      ...a,
+      label: portMap.get(a.project_port_id)?.label ?? "UNKNOWN",
+      url: `http://${host}:${a.port}`,
+    }));
+  }
+
+  async port_release(input: Record<string, unknown>) {
+    await this.init();
+    const taskId = input.taskId != null ? Number(input.taskId) : undefined;
+    const port = input.port != null ? Number(input.port) : undefined;
+
+    if (Number.isFinite(taskId)) {
+      const result = await execute(
+        "UPDATE port_assignments SET released_at=CURRENT_TIMESTAMP WHERE task_id=? AND released_at IS NULL",
+        [taskId],
+      );
+      return { ok: true, released: result.affectedRows };
+    }
+    if (Number.isFinite(port)) {
+      const result = await execute(
+        "UPDATE port_assignments SET released_at=CURRENT_TIMESTAMP WHERE port=? AND released_at IS NULL",
+        [port],
+      );
+      return { ok: true, released: result.affectedRows };
+    }
+    throw new Error("taskId or port required");
+  }
+
+  async port_status(_input: Record<string, unknown>) {
+    await this.init();
+    const active = await query<{ cnt: number }>(
+      "SELECT COUNT(*) as cnt FROM port_assignments WHERE released_at IS NULL",
+    );
+    const byProject = await query<{ project_id: string; cnt: number }>(
+      "SELECT project_id, COUNT(*) as cnt FROM port_assignments WHERE released_at IS NULL GROUP BY project_id",
+    );
+    const total = PORT_POOL_END - PORT_POOL_START + 1;
+    const used = active[0]?.cnt ?? 0;
+    return {
+      pool: { start: PORT_POOL_START, end: PORT_POOL_END, total },
+      active: used,
+      available: total - used,
+      by_project: byProject,
+    };
+  }
+
+  /**
+   * Allocate all declared ports for a task from the global pool.
+   * Uses a transaction to prevent races. Skips labels already allocated.
+   */
+  async allocatePortsForTask(taskId: number, projectId: string): Promise<PortMapEntry[]> {
+    const declaredPorts = await query<ProjectPortRow>(
+      "SELECT * FROM project_ports WHERE project_id=? ORDER BY id",
+      [projectId],
+    );
+    if (declaredPorts.length === 0) {
+      return [];
+    }
+
+    const host = getGatewayHost();
+    const conn = await getProjectPool().getConnection();
+    try {
+      await conn.beginTransaction();
+
+      // Get all currently active ports
+      const [activeRows] = await conn.execute(
+        "SELECT port FROM port_assignments WHERE released_at IS NULL",
+      );
+      const usedPorts = new Set((activeRows as Array<{ port: number }>).map((r) => r.port));
+
+      // Check existing assignments for this task
+      const [existingRows] = await conn.execute(
+        "SELECT project_port_id, port FROM port_assignments WHERE task_id=? AND released_at IS NULL",
+        [taskId],
+      );
+      const existingMap = new Map(
+        (existingRows as Array<{ project_port_id: number; port: number }>).map((r) => [
+          r.project_port_id,
+          r.port,
+        ]),
+      );
+
+      const result: PortMapEntry[] = [];
+
+      for (const pp of declaredPorts) {
+        // Already allocated for this task
+        if (existingMap.has(pp.id)) {
+          result.push({
+            label: pp.label,
+            port: existingMap.get(pp.id)!,
+            url: `http://${host}:${existingMap.get(pp.id)}`,
+          });
+          continue;
+        }
+
+        // Find next free port with bind probe
+        let assigned = false;
+        for (let p = PORT_POOL_START; p <= PORT_POOL_END; p++) {
+          if (usedPorts.has(p)) {
+            continue;
+          }
+          const bindable = await probePort(p);
+          if (!bindable) {
+            continue;
+          }
+
+          await conn.execute(
+            "INSERT INTO port_assignments (port, task_id, project_port_id, project_id) VALUES (?, ?, ?, ?)",
+            [p, taskId, pp.id, projectId],
+          );
+          usedPorts.add(p);
+          result.push({ label: pp.label, port: p, url: `http://${host}:${p}` });
+          assigned = true;
+          break;
+        }
+        if (!assigned) {
+          await conn.rollback();
+          throw new Error(
+            `PORT_POOL_EXHAUSTED: No free ports in ${PORT_POOL_START}-${PORT_POOL_END} for label "${pp.label}"`,
+          );
+        }
+      }
+
+      await conn.commit();
+      return result;
+    } catch (err) {
+      try {
+        await conn.rollback();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    } finally {
+      conn.release();
+    }
+  }
+
+  /** Release all ports for a task (on completion/cancellation) */
+  async releasePortsForTask(taskId: number): Promise<number> {
+    const result = await execute(
+      "UPDATE port_assignments SET released_at=CURRENT_TIMESTAMP WHERE task_id=? AND released_at IS NULL",
+      [taskId],
+    );
+    return result.affectedRows;
+  }
+
+  /** Get port map for a task (label -> port + url) */
+  async getPortMapForTask(taskId: number): Promise<PortMapEntry[]> {
+    const host = getGatewayHost();
+    const rows = await query<PortAssignmentRow & { label: string }>(
+      `SELECT pa.*, pp.label FROM port_assignments pa
+       JOIN project_ports pp ON pp.id = pa.project_port_id
+       WHERE pa.task_id=? AND pa.released_at IS NULL
+       ORDER BY pp.label`,
+      [taskId],
+    );
+    return rows.map((r) => ({ label: r.label, port: r.port, url: `http://${host}:${r.port}` }));
+  }
+
+  /** Build env vars object from port map */
+  portMapToEnv(portMap: PortMapEntry[]): Record<string, string> {
+    const env: Record<string, string> = {};
+    for (const entry of portMap) {
+      env[`PORT_${entry.label}`] = String(entry.port);
+    }
+    return env;
   }
 
   async executeAction(action: string, params: Record<string, unknown>) {

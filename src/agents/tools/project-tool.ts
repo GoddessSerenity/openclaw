@@ -46,6 +46,14 @@ const PROJECT_ACTIONS = [
   "memory_add",
   "memory_list",
   "memory_remove",
+  "port_declare",
+  "port_undeclare",
+  "port_list",
+  "port_release",
+  "port_status",
+  "env_set",
+  "env_remove",
+  "env_list",
 ] as const;
 
 const ProjectToolSchema = Type.Object({
@@ -94,6 +102,10 @@ const ProjectToolSchema = Type.Object({
   memoryId: Type.Optional(Type.Number()),
   content: Type.Optional(Type.String()),
   limit: Type.Optional(Type.Number()),
+  port: Type.Optional(Type.Number()),
+  key: Type.Optional(Type.String()),
+  value: Type.Optional(Type.String()),
+  secret: Type.Optional(Type.Boolean()),
 
   tags: Type.Optional(Type.Array(Type.String())),
   items: Type.Optional(Type.Array(Type.String())),
@@ -106,7 +118,7 @@ export function createProjectTool(): AnyAgentTool {
     label: "Project",
     name: "project",
     description:
-      "Project management runtime: projects, links, commands, tasks, workflow transitions, dependencies, and memory.",
+      "Project management runtime: projects, links, commands, tasks, workflow transitions, dependencies, memory, and port management.",
     parameters: ProjectToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
@@ -138,6 +150,8 @@ export function createProjectTool(): AnyAgentTool {
         "devServerUrl",
         "actor",
         "content",
+        "key",
+        "value",
       ] as const;
       for (const key of asString) {
         const value = readStringParam(params, key, { trim: false });
@@ -156,6 +170,7 @@ export function createProjectTool(): AnyAgentTool {
         "dependsOnId",
         "memoryId",
         "limit",
+        "port",
       ] as const;
       for (const key of asNumber) {
         const value = readNumberParam(params, key);
@@ -209,7 +224,15 @@ export function createProjectTool(): AnyAgentTool {
         case "task_dep_list":
         case "memory_add":
         case "memory_list":
-        case "memory_remove": {
+        case "memory_remove":
+        case "port_declare":
+        case "port_undeclare":
+        case "port_list":
+        case "port_release":
+        case "port_status":
+        case "env_set":
+        case "env_remove":
+        case "env_list": {
           return jsonResult(await svc.executeAction(action, normalized));
         }
         default:

@@ -197,6 +197,38 @@ export interface MemoryRow {
   created_at: Date;
 }
 
+export interface ProjectPortRow {
+  id: number;
+  project_id: string;
+  label: string;
+  description: string | null;
+}
+
+export interface PortAssignmentRow {
+  id: number;
+  port: number;
+  task_id: number;
+  project_port_id: number;
+  project_id: string;
+  assigned_at: Date;
+  released_at: Date | null;
+}
+
+export interface PortMapEntry {
+  label: string;
+  port: number;
+  url: string;
+}
+
+export interface ProjectEnvRow {
+  id: number;
+  project_id: string;
+  key: string;
+  value: string;
+  is_secret: boolean;
+  description: string | null;
+}
+
 export interface ProjectContext {
   project: ProjectRow;
   links: ProjectLinkRow[];
@@ -204,6 +236,7 @@ export interface ProjectContext {
   tasks: TaskRow[];
   task_dependencies: TaskDependencyRow[];
   recent_memory: MemoryRow[];
+  ports: ProjectPortRow[];
   running_processes: unknown[];
 }
 
@@ -212,4 +245,5 @@ export interface TaskDetail {
   dependencies: TaskDependencyRow[];
   attempts: TaskAttemptRow[];
   status_history: TaskStatusHistoryRow[];
+  port_assignments: PortAssignmentRow[];
 }

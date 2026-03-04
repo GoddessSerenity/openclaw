@@ -11,7 +11,15 @@ import path from "node:path";
 import { callGatewayCli } from "../gateway/call.js";
 import { query, execute, getProjectPool } from "./db.js";
 import { createWorktree } from "./git.js";
-import type { TaskRow, TaskAttemptRow, ProjectRow, MemoryRow, CommandRow } from "./types.js";
+import { getProjectService } from "./service.js";
+import type {
+  TaskRow,
+  TaskAttemptRow,
+  ProjectRow,
+  MemoryRow,
+  CommandRow,
+  PortMapEntry,
+} from "./types.js";
 
 // ─── Configuration ───────────────────────────────────────────────
 
@@ -110,6 +118,13 @@ async function transitionTask(
     "INSERT INTO task_status_history (task_id, from_status, to_status, actor, reason) VALUES (?, ?, ?, ?, ?)",
     [taskId, fromStatus, toStatus, actor, reason],
   );
+  // Release ports on terminal states
+  if (toStatus === "done" || toStatus === "cancelled" || toStatus === "stalled") {
+    await execute(
+      "UPDATE port_assignments SET released_at=CURRENT_TIMESTAMP WHERE task_id=? AND released_at IS NULL",
+      [taskId],
+    );
+  }
 }
 
 async function recordAttempt(
@@ -165,6 +180,8 @@ function buildTaskPrompt(
   memory: MemoryRow[],
   commands: CommandRow[],
   attempts: TaskAttemptRow[],
+  portMap: PortMapEntry[] = [],
+  envBriefing: Array<{ key: string; is_secret: boolean; description: string | null }> = [],
 ): string {
   const sections: string[] = [];
 
@@ -227,6 +244,31 @@ function buildTaskPrompt(
       }
       sections.push("");
     }
+  }
+
+  if (envBriefing && envBriefing.length > 0) {
+    sections.push(`## Environment Variables`);
+    sections.push(
+      `The following env vars are injected automatically when you run project commands via \`cmd_run\`:`,
+    );
+    for (const e of envBriefing) {
+      const secretTag = e.is_secret ? " (secret)" : "";
+      const desc = e.description ? ` — ${e.description}` : "";
+      sections.push(`- \`${e.key}\`${secretTag}${desc}`);
+    }
+    sections.push("");
+  }
+
+  if (portMap.length > 0) {
+    sections.push(`## Port Assignments`);
+    sections.push(`Your task has the following ports allocated as environment variables:`);
+    for (const entry of portMap) {
+      sections.push(`- \`$PORT_${entry.label}\` = ${entry.port} → ${entry.url}`);
+    }
+    sections.push(
+      `\nUse these in your commands (e.g. \`npm run dev -- --port $PORT_FRONTEND\`). They are injected automatically as env vars when you run project commands via \`cmd_run\`.`,
+    );
+    sections.push("");
   }
 
   const workDir =
@@ -443,7 +485,14 @@ export async function executeNextTask(): Promise<ExecutorResult> {
     getProjectCommands(task.project_id),
     getTaskAttempts(task.id),
   ]);
-  const prompt = buildTaskPrompt(project, task, memory, commands, attempts);
+
+  // Allocate ports and get env briefing
+  const svc = getProjectService();
+  await svc.init();
+  const portMap = await svc.allocatePortsForTask(task.id, task.project_id);
+  const envBriefing = await svc.getProjectEnvBriefing(task.project_id);
+
+  const prompt = buildTaskPrompt(project, task, memory, commands, attempts, portMap, envBriefing);
 
   await notify(
     `⚙️ <b>Executing:</b> ${esc(task.title)}\n<i>${esc(project.name)} | Attempt ${task.attempt_count + 1}/${task.max_attempts}</i>`,

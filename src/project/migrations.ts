@@ -171,6 +171,14 @@ export async function runMigrations(): Promise<void> {
     for (const statement of CREATE_TABLE_STATEMENTS) {
       await projectConnection.execute(statement);
     }
+    // Create env tables
+    for (const statement of ENV_TABLE_STATEMENTS) {
+      await projectConnection.execute(statement);
+    }
+    // Create port tables
+    for (const statement of PORT_TABLE_STATEMENTS) {
+      await projectConnection.execute(statement);
+    }
     // Run ALTER migrations for existing databases
     for (const alt of ALTER_MIGRATIONS) {
       try {
@@ -183,6 +191,58 @@ export async function runMigrations(): Promise<void> {
     await projectConnection.end();
   }
 }
+
+const PORT_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS project_ports (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  project_id VARCHAR(64) NOT NULL,
+  label VARCHAR(64) NOT NULL,
+  description VARCHAR(255) NULL,
+  UNIQUE KEY uq_project_port_label (project_id, label),
+  INDEX idx_project_ports_project (project_id),
+  CONSTRAINT fk_ports_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS port_assignments (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  port INT NOT NULL,
+  task_id BIGINT NOT NULL,
+  project_port_id BIGINT NOT NULL,
+  project_id VARCHAR(64) NOT NULL,
+  assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  released_at DATETIME NULL,
+  UNIQUE KEY uq_task_port_label (task_id, project_port_id),
+  INDEX idx_port_assignments_task (task_id),
+  INDEX idx_port_assignments_port (port),
+  CONSTRAINT fk_pa_task FOREIGN KEY (task_id) REFERENCES project_tasks(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_pa_port FOREIGN KEY (project_port_id) REFERENCES project_ports(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT fk_pa_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB;
+`;
+
+const ENV_TABLES_SQL = `
+CREATE TABLE IF NOT EXISTS project_env (
+  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  project_id VARCHAR(64) NOT NULL,
+  \`key\` VARCHAR(128) NOT NULL,
+  value TEXT NOT NULL,
+  is_secret BOOLEAN NOT NULL DEFAULT FALSE,
+  description VARCHAR(255) NULL,
+  UNIQUE KEY uq_project_env_key (project_id, \`key\`),
+  INDEX idx_project_env_project (project_id),
+  CONSTRAINT fk_env_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB;
+`;
+
+const ENV_TABLE_STATEMENTS = ENV_TABLES_SQL.split(";")
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0)
+  .map((s) => `${s};`);
+
+const PORT_TABLE_STATEMENTS = PORT_TABLES_SQL.split(";")
+  .map((s) => s.trim())
+  .filter((s) => s.length > 0)
+  .map((s) => `${s};`);
 
 /** Idempotent ALTER statements for upgrading existing schemas */
 const ALTER_MIGRATIONS: string[] = [
